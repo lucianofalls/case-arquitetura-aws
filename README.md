@@ -41,7 +41,7 @@ Amazon EKS (EC2, Multi-AZ)
 Após commit, sem bloquear a resposta:
 DynamoDB Streams (captura de alterações confirmadas)
   |
-EventBridge Pipes (filtro: INSERT de Outbox; transformação)
+EventBridge Pipes (filtro: item OUTBOX em NewImage; transformação)
   |
 Amazon EventBridge custom event bus
   |
