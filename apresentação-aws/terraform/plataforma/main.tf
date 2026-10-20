@@ -90,22 +90,20 @@ resource "aws_ecr_repository" "apps" {
 }
 
 resource "aws_ecr_lifecycle_policy" "apps" {
-
-  for_each = aws_ecr_repository.apps
+  for_each   = aws_ecr_repository.apps
   repository = each.value.name
   policy = jsonencode({
-rules=[{
-rulePriority=1,description="retain last 30 tagged images",selection={
-tagStatus="any",countType="imageCountMoreThan",countNumber=30
+    rules = [
+      {
+        rulePriority = 1
+        description  = "retain last 30 images"
+        selection = {
+          tagStatus   = "any"
+          countType   = "imageCountMoreThan"
+          countNumber = 30
+        }
+        action = { type = "expire" }
+      }
+    ]
+  })
 }
-,action={
-type="expire"
-}
-
-}
-]
-}
-)
-
-}
-
