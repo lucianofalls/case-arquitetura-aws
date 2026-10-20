@@ -85,7 +85,8 @@ public final class DynamoAuthorizationAdapter implements AuthorizationUseCase.Au
                     case ESTORNO -> before.reverse(original.type(), amount.cents());
                 };
             } catch (ContractLimit.InsufficientLimit insufficient) {
-                persistDecline(idemPk, payloadHash, "INSUFFICIENT_LIMIT");
+                Receipt prior = persistDecline(idemPk, payloadHash, "INSUFFICIENT_LIMIT");
+                if (prior != null) return prior;
                 throw new ApiFailure(HttpStatus.PAYMENT_REQUIRED, "INSUFFICIENT_LIMIT", "Limite insuficiente");
             } catch (ContractLimit.InvalidTransition invalid) {
                 throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_TRANSITION", invalid.getMessage());
@@ -185,7 +186,7 @@ public final class DynamoAuthorizationAdapter implements AuthorizationUseCase.Au
         throw new ApiFailure(HttpStatus.CONFLICT, "CONCURRENT_UPDATE", "Número máximo de tentativas atingido");
     }
 
-    private void persistDecline(String idemPk, String requestHash, String reason) {
+    private Receipt persistDecline(String idemPk, String requestHash, String reason) {
         try {
             ddb.putItem(PutItemRequest.builder().tableName(table)
                     .item(Map.of(
@@ -193,11 +194,13 @@ public final class DynamoAuthorizationAdapter implements AuthorizationUseCase.Au
                             "entityType", s("IDEMPOTENCY"), "payloadHash", s(requestHash),
                             "outcome", s("DECLINED"), "reason", s(reason)))
                     .conditionExpression("attribute_not_exists(pk)").build());
+            return null;
         } catch (ConditionalCheckFailedException alreadyStored) {
             // Only concurrent same-key writers can cause this; retry path returns
             // the exact existing result on the next HTTP call.
             var stored = read(idemPk, "REQUEST");
-            if (!stored.isEmpty()) replay(stored, requestHash);
+            if (!stored.isEmpty()) return replay(stored, requestHash);
+            throw new ApiFailure(HttpStatus.CONFLICT, "IDEMPOTENCY_RACE", "Outra requisição está decidindo esta chave");
         }
     }
 
