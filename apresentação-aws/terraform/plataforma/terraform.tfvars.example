@@ -1,0 +1,7 @@
+region = "us-east-1"
+name = "pod99-case"
+environment = "demo"
+# To reach EKS outside VPN/VPC, whitelist ONLY your current admin CIDR.
+# admin_cidrs = ["YOUR_PUBLIC_IP/32"]
+admin_cidrs = []
+enable_edge = false
