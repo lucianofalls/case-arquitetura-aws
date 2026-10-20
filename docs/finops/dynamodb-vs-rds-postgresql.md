@@ -1,6 +1,6 @@
 # Comparativo arquitetural e FinOps — DynamoDB vs RDS PostgreSQL
 
-**Status:** alternativas sob avaliação. Nenhuma decisão final ou benchmark realizado.
+**Status:** arquitetura-base atual = **DynamoDB + Streams + EventBridge Pipes + EventBridge**; **RDS PostgreSQL é alternativa** para comparação de custo/consistência. Não houve benchmark nem escolha definitiva para produção.
 
 ## Pergunta de decisão
 Para a plataforma do case Itaú POD99, qual persistência atende com melhor combinação de custo total, atomicidade, rastreabilidade e SLO à autorização/reserva de limite por contrato (até 5.000 TPS em pico)?
@@ -41,7 +41,7 @@ Para um contrato com limite disponível de R$ 7.000, duas requisições simultâ
 - Injeção de falha entre commit e entrega do evento; replay idempotente.
 - Comparação de HA em duas ou três zonas de disponibilidade, RPO/RTO e retenção regulatória.
 
-## Decisão
-**Pendente (ADR não aprovada).** Não escolher um banco baseado apenas em custo estimado por 10 milhões de operações nem por facilidade de integração com EventBridge.
+## Situação da decisão
+A [ADR-001](../adr/ADR-001-dynamodb-streams-eventbridge.md) documenta **DynamoDB como baseline para prosseguir os diagramas e a modelagem do case**, sem encerrar a avaliação. PostgreSQL permanece alternativa técnica e financeira; qualquer mudança de arquitetura-base exigirá revisão explícita da ADR e dos artefatos. Não concluir sobre custo apenas a partir de 10 milhões de operações nem da facilidade de integração.
 
 Fontes: https://aws.amazon.com/dynamodb/pricing/ e https://aws.amazon.com/rds/postgresql/pricing/
