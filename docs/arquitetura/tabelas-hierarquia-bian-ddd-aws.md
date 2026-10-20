@@ -1,8 +1,8 @@
-# Tabelas de rastreabilidade — BIAN → DDD → EKS → PostgreSQL
+# Tabelas de rastreabilidade — BIAN → DDD → EKS → DynamoDB
 
 > **Status:** proposta para o desafio técnico POD99. **Nada está implantado.**
 > Origem de requisitos: PDF *Desafio Técnico — POD99, Nova Plataforma de Finanças · Arquiteto de Aplicação* (5 páginas).
-> O enunciado não prescreve BIAN, nomes de Bounded Contexts, EKS ou PostgreSQL. São opções de modelagem e implementação a justificar.
+> O enunciado não prescreve BIAN, nomes de Bounded Contexts, EKS ou DynamoDB. São opções de modelagem e implementação a justificar.
 >
 > **Convenção:** **[BIAN]** = referência de Service Landscape; **[CASE]** = exigência do PDF; **[SOLUÇÃO]** = nomenclatura/decisão nossa.
 
@@ -17,7 +17,7 @@
 | 5 | Bounded Context | **[SOLUÇÃO]** DDD | Delimitar modelo de domínio, linguagem e propriedade dos dados |
 | 6 | Aggregate / Entity / Value Object | **[SOLUÇÃO]** DDD | Definir invariantes, consistência e ciclo de vida |
 | 7 | Microsserviço no Amazon EKS | **[SOLUÇÃO]** AWS | Executar componentes com interfaces, deploy e propriedade definidos |
-| 8 | Database / Schema / Table | **[SOLUÇÃO]** persistência | Persistir estados, chaves de idempotência, reservas e eventos Outbox |
+| 8 | Tabela / Chave / Item | **[SOLUÇÃO]** persistência | Persistir estados, chaves de idempotência, reservas e eventos Outbox com padrões de acesso definidos |
 
 **Atenção:** o *Business Capability Model* (BCM) e o *BIAN Service Landscape* (BSL) são visões relacionadas, **não uma árvore única oficial**. O nome `Plataforma de Gestão de Limites e Autorização de Transações` é dado pelo **case**, não um item padronizado do BCM. Um Service Domain BIAN **não precisa corresponder a um microsserviço**.
 
@@ -40,144 +40,95 @@
 
 ## 3. Dos Service Domains aos Bounded Contexts e microsserviços
 
-| Microsserviço proposto **[SOLUÇÃO]** | Referência funcional **[BIAN]** | Bounded Context / módulo **[SOLUÇÃO]** | Agregados/objetos candidatos | Persistência proposta |
+| Microsserviço **[SOLUÇÃO]** | Referência funcional **[BIAN]** | Bounded Context / módulo **[SOLUÇÃO]** | Agregados/conceitos | Banco da arquitetura-base |
 |---|---|---|---|---|
-| `authorization-limit-service` | Transaction Authorization; Position Keeping; regras do produto contratual | `AuthorizationAndLimitReservation`, módulos `authorization` e `limits` | `ContractLimit` (raiz do agregado de limite), `Authorization`, `LimitReservation`, `IdempotencyRecord`, `OutboxEvent` | PostgreSQL `authorization_limits_db` |
-| `accounting-service` | Financial Accounting | `AccountingIntegration` | `ConsumedEvent`, `AccountingInstruction` | PostgreSQL `accounting_integration_db` |
-| `core-banking-acl-service` | Current Account / Consumer Loan / outros produtos conforme contrato | `CoreBankingIntegration` | Adaptadores ACL, DTOs, traduções e contratos de integração | Inicialmente **sem banco** se for stateless |
+| `authorization-limit-service` | Transaction Authorization; Position Keeping; regras do produto | `AuthorizationAndLimitReservation`, módulos `authorization` e `limits` | `ContractLimit`, `Authorization`, `LimitReservation`, `IdempotencyRecord`, `OutboxEvent` | DynamoDB `financial-authorization` |
+| `accounting-service` | Financial Accounting | `AccountingIntegration` | `ConsumedEvent`, `AccountingInstruction` | DynamoDB `accounting-processing`, própria (candidata) |
+| `core-banking-acl-service` | Current Account / Consumer Loan e demais produtos aplicáveis | `CoreBankingIntegration` | Adaptadores ACL e DTOs | Inicialmente stateless, sem banco |
 
-**Justificativa:** `authorization-limit-service` reúne dois **módulos de domínio** em **um deploy e uma transação local**. Não é mapeamento 1:1 dos Service Domains BIAN. O case exige consistência financeira sob concorrência; dois serviços com databases isoladas exigiriam um desenho explícito de coordenação, compensação e reconciliação.
+**Motivo:** a autorização e a reserva financeira estão em dois módulos DDD, mas são gravadas por um **único microsserviço** para ter um único limite de transação. BIAN não impõe que cada Service Domain tenha seu próprio deploy.
 
-O `accounting-service` apenas integra o processamento contábil. Não implica substituir o razão geral do banco. `core-banking-acl-service` traduz modelos e protocolos legados, evitando que contaminem o domínio de autorização.
+## 4. Da API à estrutura física DynamoDB
 
-## 4. Da API ao banco — nomes de implementação
-
-| Etapa | Nome escolhido | Motivo |
+| Camada | Nome | Motivo |
 |---|---|---|
-| Entrada HTTP **[CASE]** | `POST /v1/contratos/{id_contrato}/autorizacoes` | Autorização síncrona, versionada e contract-first |
-| Proteção contra repetição **[CASE]** | `Idempotency-Key` (UUID) | Reentrega da mesma solicitação não duplica reserva |
-| Contexto **[SOLUÇÃO]** | `AuthorizationAndLimitReservation` | Manter regras de aprovação e reserva sob uma fronteira de consistência |
-| Aggregate Root **[SOLUÇÃO]** | `ContractLimit` | Preservar limite disponível não negativo e não exceder disponibilidade |
-| Objetos de domínio **[SOLUÇÃO]** | `Authorization`, `LimitReservation`, `Money`, `ContractId` | Estados e tipos expressivos; `Money` evita aritmética imprecisa com `float` |
-| Deployment Kubernetes **[SOLUÇÃO]** | `authorization-limit-service` | Executar o núcleo no EKS |
-| Engine de banco **[SOLUÇÃO]** | Amazon RDS for PostgreSQL, **candidato** | ACID, constraints, SQL e teste local equivalente em PostgreSQL |
-| Database **[SOLUÇÃO]** | `authorization_limits_db` | Propriedade do núcleo de autorização e limites |
-| Schema **[SOLUÇÃO]** | `core` | Organizar os objetos transacionais |
-| Evento **[CASE]** | `TransacaoAutorizada` v1 | Informar consumidores após confirmação da operação |
+| API **[CASE]** | `POST /v1/contratos/{id_contrato}/autorizacoes` | Contract-first, síncrona e versionada |
+| Idempotência **[CASE]** | `Idempotency-Key` (UUID) | Impedir duplicidade da mesma operação |
+| Bounded Context **[SOLUÇÃO]** | `AuthorizationAndLimitReservation` | Proteger conjuntamente a decisão e a reserva |
+| Aggregate Root **[SOLUÇÃO]** | `ContractLimit` | Limite disponível não pode ficar negativo |
+| Value Objects **[SOLUÇÃO]** | `Money`, `ContractId`, `AuthorizationId` | Tipos expressivos e valor monetário exato |
+| Deployment **[SOLUÇÃO]** | `authorization-limit-service` | Runtime de aplicação no Amazon EKS |
+| Banco **[SOLUÇÃO]** | Amazon DynamoDB | Transações ACID por `TransactWriteItems` |
+| Tabela do núcleo **[SOLUÇÃO]** | `financial-authorization` | Propriedade exclusiva do núcleo |
+| Item `LIMIT` **[SOLUÇÃO]** | `PK=CONTRACT#<id>; SK=LIMIT` | Limite em unidades monetárias inteiras |
+| Item `AUTH` **[SOLUÇÃO]** | `PK=AUTH#<id>; SK=META` | Autorização e dados do ciclo da reserva |
+| Item `IDEMPOTENCY` **[SOLUÇÃO]** | `PK=IDEMPOTENCY#<consumidor>#<UUID>; SK=REQUEST` | Hash do payload e resultado original |
+| Item `OUTBOX` **[SOLUÇÃO]** | `PK=OUTBOX#<event_id>; SK=EVENT` | Evento de domínio imutável |
+| Evento **[CASE]** | `TransacaoAutorizada` v1 | Comunicação com consumidores depois do commit |
 
-### Tabelas propostas do núcleo
+Os quatro tipos de item **não são quatro tabelas físicas**. Nesse desenho, `LimitReservation` é conceito de domínio representado no item `AUTH`. Se a reserva passar a possuir item independente, isso acrescentará uma escrita transacional e afetará o custo.
 
-| Database | Schema | Table | Por que existe |
-|---|---|---|---|
-| `authorization_limits_db` | `core` | `contract_limit` | Guardar limite disponível e reservado por contrato |
-| `authorization_limits_db` | `core` | `authorization` | Registrar decisão e estado da autorização |
-| `authorization_limits_db` | `core` | `limit_reservation` | Controlar o ciclo de vida da reserva e estornos |
-| `authorization_limits_db` | `core` | `idempotency_record` | Vincular chave, hash de payload e resposta original |
-| `authorization_limits_db` | `core` | `outbox_event` | Persistir evento de negócio no mesmo commit, para publicação confiável |
-| `accounting_integration_db` | `integration` | `consumed_event` | Deduplicar eventos recebidos |
-| `accounting_integration_db` | `integration` | `accounting_instruction` | Registrar instrução e status da integração com contabilidade |
+## 5. Regra de concorrência e quatro escritas atômicas
 
-Os nomes de tabela são propostas iniciais, **não estruturas impostas pelo BIAN**. A modelagem do agregado e índices devem ser testados com os padrões reais de acesso.
+**Requisito do case:** limite de R$ 7.000 e duas operações simultâneas de R$ 5.000. Não se podem aprovar as duas.
 
-## 5. Encadeamento completo — autorização e reserva
+| Ação `TransactWriteItems` | Item | Efeito e condição |
+|---|---|---|
+| `Update` condicional | `LIMIT` | `available_minor_units >= amount_minor_units`; subtrai disponível e acrescenta reservado |
+| `Put` | `AUTH` | Cria autorização e representação da reserva |
+| `Put` condicional | `IDEMPOTENCY` | Exige que a chave idempotente ainda não exista |
+| `Put` | `OUTBOX` | Cria evento `TransacaoAutorizada` v1 na mesma transação |
 
-```text
-[CASE] Gestão de Limites e Autorização de Transações
-  ↳ [BIAN] Channels > Cross Channel > Transaction Authorization
-  ↳ [BIAN] Operations > Accounting Services > Position Keeping
-  ↳ [BIAN] Products > Loans and Deposits > Consumer Loan (só se esse for o produto)
-      ↓ referências para análise; não herança técnica automática
-[SOLUÇÃO] Bounded Context: AuthorizationAndLimitReservation
-      ↓
-[SOLUÇÃO] Aggregate Root: ContractLimit
-          Entidades/objetos: Authorization, LimitReservation, Money
-      ↓
-[SOLUÇÃO] EKS / Deployment: authorization-limit-service
-      ↓
-[SOLUÇÃO] RDS for PostgreSQL:
-          authorization_limits_db
-          └── core
-              ├── contract_limit
-              ├── authorization
-              ├── limit_reservation
-              ├── idempotency_record
-              └── outbox_event
-```
+**A condição e a atualização devem estar na mesma ação `Update`**. O DynamoDB não permite executar `ConditionCheck` e `Update` separados sobre o mesmo item no mesmo `TransactWriteItems`. Tudo é confirmado ou tudo é cancelado.
 
-**Regra crítica do case:** com R$ 7.000 disponíveis, duas operações simultâneas de R$ 5.000 não podem ser aprovadas em conjunto.
+Uma falha de transação pode ser saldo insuficiente ou conflito de concorrência: o serviço tem de diferenciar HTTP 402 de HTTP 409 e aplicar retries apenas em situações apropriadas. `ClientRequestToken` não substitui o registro durável da `Idempotency-Key`.
 
-Exemplo conceitual da atualização condicional dentro de **uma transação SQL**:
-
-```sql
-BEGIN;
-UPDATE core.contract_limit
-SET available_amount = available_amount - :valor,
-    reserved_amount = reserved_amount + :valor
-WHERE contract_id = :id_contrato
-  AND available_amount >= :valor;
-
--- Aprovação somente se exatamente uma linha foi atualizada.
--- Na mesma transação: INSERT authorization, limit_reservation,
--- idempotency_record (chave UNIQUE) e outbox_event.
-COMMIT;
-```
-
-O código real deve usar parâmetros preparados, diferenciação de débito/crédito/reserva/estorno, verificação de resultado do UPDATE e tratamento de conflito idempotente. Concorrência na mesma linha é serializada pelos locks de escrita PostgreSQL.
-
-## 6. Fluxo assíncrono até a contabilidade
+## 6. Fluxo de eventos após o commit
 
 ```text
 Cliente → API Gateway / WAF
            ↓
 Amazon EKS: authorization-limit-service
            ↓
-Amazon RDS PostgreSQL (UPDATE limite + INSERTs + Outbox, COMMIT)
-           ├──→ Resposta síncrona ao cliente
-           └──→ Outbox relay/worker (com retry e monitoramento)
-                      ↓
-                 Amazon EventBridge
-                      ↓
-                 Amazon SQS (fila por consumidor)
-                      ↓
-                 EKS: accounting-service
-                      ↓
-                 PostgreSQL: accounting_integration_db
-                      ↓
-                 Core contábil existente
+DynamoDB: TransactWriteItems (LIMIT + AUTH + IDEMPOTENCY + OUTBOX)
+           ├─→ resposta síncrona após commit
+           └─→ DynamoDB Streams habilitado
+                    ↓
+                EventBridge Pipes
+                - filtro: registros INSERT do tipo OUTBOX
+                - transformação de payload de negócio
+                    ↓
+                EventBridge custom event bus
+                    ↓
+                regras e filas independentes
+                 ├─→ SQS Contabilidade → accounting-service → banco próprio
+                 ├─→ SQS Antifraude
+                 ├─→ SQS Notificações
+                 └─→ SQS Data Platform
 ```
 
-**Motivo de Outbox:** evitar que uma reserva seja confirmada no banco e o evento se perca se a publicação falhar. O relay pode reenviar; consumidores devem ser idempotentes (sem garantia exactly-once de ponta a ponta).
+O EventBridge **não recebe automaticamente** qualquer escrita DynamoDB; Streams e Pipes precisam estar configurados. Eventos podem ser duplicados e reordenados; os consumidores deduplicam com `event_id`. **Streams retém alterações por aproximadamente 24 horas**; a solução requer monitoração, falhas/retries, reconciliação e republicação de eventos persistidos na Outbox para indisponibilidade prolongada.
 
-## 7. Por que PostgreSQL e não DynamoDB nesta primeira implementação?
+## 7. Por que DynamoDB aqui? E PostgreSQL?
 
-**Recomendação candidata para o MVP de cinco dias úteis:** PostgreSQL em Docker na demo e Amazon RDS for PostgreSQL Multi-AZ no desenho AWS. A comparação definitiva de produção permanece pendente.
-
-| Critério | PostgreSQL — candidato MVP | DynamoDB — alternativa |
+| Critério | DynamoDB (arquitetura-base do case) | RDS PostgreSQL (alternativa não selecionada) |
 |---|---|---|
-| Atomicidade do limite | Transação SQL + UPDATE condicionado, constraints e lock de linha | `TransactWriteItems` com condição atômica |
-| Demonstração local | Mesmo engine PostgreSQL via Docker | DynamoDB Local não replica todos os aspectos de produção |
-| Registro de autorização, reserva, idempotência e Outbox | Um único `COMMIT` | Uma transação entre itens |
-| Consultas relacionais para auditoria | SQL e índices tradicionais | Projetar chaves, índices e consultas por acesso |
-| Custo | Instâncias, alta disponibilidade, storage e I/O | Leituras/escritas, storage, backups e recursos adicionais |
-| Escala de 5.000 TPS | **A provar por benchmark e capacity planning** | **A provar com distribuição por chave e contention tests** |
+| Reserva segura | `TransactWriteItems` + `Update` condicional | Transação SQL + `UPDATE` condicional e lock |
+| Idempotência | Item dedicado na mesma transação | Unique key + registro SQL |
+| Evento confiável | Item Outbox no mesmo commit | Linha Outbox no mesmo COMMIT |
+| Publicação | **Streams → Pipes → EventBridge → SQS** | Relay/CDC → EventBridge → SQS |
+| Escalabilidade e custo | Dependem de padrão de chaves, leituras, escritas, índices, concorrência | Dependem de primário, HA, I/O, conexões, carga e índice |
+| Situação | **Baseline para os desenhos** | **Comparação técnica/FinOps pendente** |
 
-**A escolha do PostgreSQL é de implementação e clareza do case, não uma exigência do BIAN, uma preferência declarada da AWS nem prova de menor custo.**
+A decisão de DynamoDB para a baseline **não comprova menor custo ou 5.000 TPS**. Esses requisitos exigem carga realista e benchmark. Ver [FinOps](../finops/estimativa-custos.md) e [comparação](../finops/dynamodb-vs-rds-postgresql.md).
 
-Veja o [comparativo de custos](../finops/dynamodb-vs-rds-postgresql.md) e as [estimativas de DynamoDB](../finops/estimativa-custos.md).
+## 8. Pendências e referências
 
-## 8. Pendências de desenho
+A modelagem de tipos `DEBITO`, `CREDITO`, `RESERVA` e `ESTORNO`, o comportamento de recusas idempotentes, o ciclo de vida das reservas, auditoria, as operações BIAN v14 detalhadas, SLOs e retenção ainda precisam de refinamento.
 
-- Validar Service Operations, Control Records e Behavior Qualifiers reais por Service Domain no catálogo BIAN v14.
-- Especificar máquina de estados da autorização, reserva, captura/liquidação e estorno; regras de contratos por produto.
-- Modelar `UNIQUE` para idempotência, resultado de replay, hash de payload e prazo de retenção.
-- Definir SLO p95/p99, RTO/RPO, dimensionamento Multi-AZ, reconciliação de Outbox, testes de falha e carga de 5.000 TPS.
-- Completar ADR de banco PostgreSQL vs DynamoDB e custos totais (incluindo EKS, rede e observabilidade).
-
-## Referências
-
-- Documento fornecido no case: *Desafio Técnico — POD99 — Nova Plataforma de Finanças · Arquiteto de Aplicação*.
-- [BIAN Service Landscape](https://bian.org/deliverables/service-landscape/)
-- [AWS Well-Architected Framework](https://docs.aws.amazon.com/wellarchitected/latest/framework/welcome.html)
-- [AWS Prescriptive Guidance — Transactional Outbox](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)
-- [Amazon RDS PostgreSQL — Pricing](https://aws.amazon.com/rds/postgresql/pricing/)
-- [Amazon DynamoDB — Pricing](https://aws.amazon.com/dynamodb/pricing/)
+- PDF fornecido: `Desafio Técnico — POD99 — Nova Plataforma de Finanças · Arquiteto de Aplicação`.
+- [BIAN Service Landscape v14](https://bian.org/deliverables/service-landscape/)
+- [Amazon DynamoDB — TransactWriteItems](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html)
+- [DynamoDB ↔ EventBridge](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/eventbridge-for-dynamodb.html)
+- [EventBridge Pipes com origem DynamoDB Streams](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-pipes-dynamodb.html)
+- [AWS Transactional Outbox](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)
