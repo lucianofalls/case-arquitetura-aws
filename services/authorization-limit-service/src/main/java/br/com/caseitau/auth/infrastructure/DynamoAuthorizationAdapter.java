@@ -89,13 +89,14 @@ public final class DynamoAuthorizationAdapter implements AuthorizationStore {
                             ":version", n(version), ":amount", n(amountMinorUnits), ":one", n(1)))
                     .build();
 
-            var authorization = Put.builder().tableName(table).item(Map.of(
-                    "pk", s("AUTH#" + authId), "sk", s("META"), "entityType", s("AUTH"),
-                    "authorizationId", s(authId), "contractId", s(command.contractId()),
-                    "accountId", s(command.accountId()), "amountMinorUnits", n(amountMinorUnits),
-                    "currency", s("BRL"), "reservationState", s("RESERVED"),
-                    "reservedAfterMinorUnits", n(newReserved),
-                    "createdAt", s(occurredAt)))
+            var authorization = Put.builder().tableName(table).item(Map.ofEntries(
+                    Map.entry("pk", s("AUTH#" + authId)), Map.entry("sk", s("META")),
+                    Map.entry("entityType", s("AUTH")), Map.entry("authorizationId", s(authId)),
+                    Map.entry("contractId", s(command.contractId())), Map.entry("accountId", s(command.accountId())),
+                    Map.entry("amountMinorUnits", n(amountMinorUnits)), Map.entry("currency", s("BRL")),
+                    Map.entry("reservationState", s("RESERVED")),
+                    Map.entry("reservedAfterMinorUnits", n(newReserved)),
+                    Map.entry("createdAt", s(occurredAt))))
                     .conditionExpression("attribute_not_exists(pk)").build();
 
             var idem = Put.builder().tableName(table).item(Map.of(
