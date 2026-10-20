@@ -1,7 +1,7 @@
 # ADR-001 — DynamoDB transacional com Outbox, Streams e EventBridge
 
 **Data:** 2026-10-20  
-**Status:** **baseline de arquitetura aprovada para prosseguir o desenho**; validação final de TCO, SLO e benchmark pendente.  
+**Status:** **baseline de trabalho para os desenhos, em estudo**; não é aprovação definitiva de produção. Validação final de TCO, SLO e benchmark pendente.  
 **Escopo:** núcleo de autorização e limites do desafio técnico POD99.
 
 ## Contexto
