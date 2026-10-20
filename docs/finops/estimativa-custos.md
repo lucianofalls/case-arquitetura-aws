@@ -1,10 +1,10 @@
 # FinOps — Estimativa preliminar de custos AWS
 
-**Status:** hipótese arquitetural, sem implantação nem benchmark. **Referência:** preços públicos AWS em `us-east-1`, sem descontos; validar em [AWS Pricing Calculator](https://calculator.aws/) antes da defesa.
+**Status:** estimativa **somente da arquitetura-base DynamoDB + Streams + EventBridge Pipes + EventBridge + SQS** (RDS PostgreSQL é alternativa, não incluída nos subtotais). Sem implantação nem benchmark. **Referência:** preços públicos AWS em `us-east-1`, sem descontos; validar em [AWS Pricing Calculator](https://calculator.aws/) antes da defesa.
 
 ## 1. Premissas de volume
 - O desafio define **pico** de ~5.000 TPS, não 5.000 TPS sustentados.
-- Hipótese inicial: 1 aprovação = 4 itens DynamoDB de até 1 KiB, gravados em uma transação ACID: saldo, autorização/reserva, idempotência e Outbox.
+- Hipótese inicial: 1 aprovação = **4 operações em itens DynamoDB de até 1 KiB**, gravadas em uma transação ACID: Update de limite (LIMIT), Put de autorização **com dados da reserva** (AUTH), Put de idempotência (IDEMPOTENCY) e Put de Outbox (OUTBOX). Se houver **quinto item físico de reserva**, recalcular WRUs e custos.
 - 4 gravações transacionais de 1 KiB = **8 write request units** (WRUs).
 - 1 leitura fortemente consistente de até 4 KiB = 1 read request unit (RRU). Esta é uma simplificação: pode ser necessário ler mais dados ou nenhuma leitura prévia, conforme modelo.
 - 1 evento Outbox = 1 solicitação EventBridge Pipes (evento até 64 KiB) e 1 evento customizado EventBridge.
@@ -43,6 +43,8 @@ Taxas indicativas conforme tabelas e exemplos públicos; confirmar vigência, vo
 - Se alternativa for RDS PostgreSQL: horas das instâncias de primary e standby Multi-AZ, armazenamento, IOPS, snapshots, WAL, conexões, observabilidade e publicação Outbox (polling ou CDC).
 
 ## 5. Conclusão provisória
+O [ADR-001](../adr/ADR-001-dynamodb-streams-eventbridge.md) adota **DynamoDB como baseline de desenho**, sem encerrar o estudo de TCO.
+
 **Não está provado que DynamoDB seja mais barato que RDS PostgreSQL.** O DynamoDB oferece baixa administração e capacidade sob demanda, mas seu custo escala com a quantidade e o tamanho das operações. No PostgreSQL a escrita não tem cobrança direta por unidade, porém a computação provisionada, capacidade do primário e configuração Multi-AZ devem suportar o mesmo TPS e a mesma consistência.
 
 Para uma comparação justa, fixar o mesmo perfil: TPS médio e pico, concorrência por contrato, porcentagem de aprovações/rejeições, quantidade de gravações, retenção, tamanho dos dados, SLA de latência p95/p99, alta disponibilidade e falhas.
