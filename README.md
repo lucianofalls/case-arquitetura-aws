@@ -1,8 +1,20 @@
 # Case de Arquitetura AWS — POD99 · Nova Plataforma de Finanças
 
-> **Status:** arquitetura-alvo em estudo, sem microsserviços implementados ou recursos AWS provisionados.
+> **Status:** fontes e infraestrutura Terraform em `apresentação-aws/`, com CI validado; nenhum recurso AWS provisionado.
 >
 > **Repositório público:** documentação independente de um case técnico. Não contém informações internas ou infraestrutura real do banco.
+
+## Implementação atual do case
+
+A implementação principal — **microsserviços Java 17/Spring Boot, bounded contexts DDD, Clean/Hexagonal Architecture, contratos OAS 3/AsyncAPI, Terraform, Docker Compose, testes e diagramas AWS4** — está em **[apresentação-aws/](apresentação-aws/README.md)**.
+
+- [Diagrama de integração C4 + ícones oficiais AWS em Draw.io](apresentação-aws/diagramas/pod99-integracao-aws.drawio)
+- [Terraform da plataforma AWS (EKS, DynamoDB, Streams, Pipes, EventBridge, SQS, WAF)](apresentação-aws/terraform/plataforma/)
+- [Terraform de workloads Kubernetes](apresentação-aws/terraform/workloads/)
+- [Status da implementação e pendências](apresentação-aws/docs/implementacao/status-mvp.md)
+- [CI: Maven, testes DynamoDB Local, Terraform validate e contratos](https://github.com/lucianofalls/case-arquitetura-aws/actions/workflows/pod99-apresentacao-aws.yml)
+
+**Os arquivos em `services/` e `docs/` na raiz pertencem às iterações anteriores e permanecem apenas como histórico. A referência para o desenvolvimento é `apresentação-aws/`.** Ainda não houve deploy de recursos AWS ou teste de carga de 5.000 TPS.
 
 ## Objetivo do case
 
