@@ -1,0 +1,9 @@
+**/target/
+**/.terraform/
+**/*.tfstate
+**/*.tfstate.*
+**/terraform.tfvars
+**/.env
+**/.idea/
+**/.DS_Store
+*.log
