@@ -128,7 +128,7 @@ authorization-limit-service
   └─→ DynamoDB Streams habilitado
          │ registros de alterações
          ▼
-       EventBridge Pipes (filtra INSERT de OUTBOX + transforma payload)
+       EventBridge Pipes (filtra NewImage do tipo OUTBOX + transforma payload)
          │
          ▼
        EventBridge custom event bus (roteamento por regra)
