@@ -1,0 +1,13 @@
+spring:
+  application:
+    name: accounting-service
+  main:
+    web-application-type: none
+app:
+  aws:
+    region: ${AWS_REGION:us-east-1}
+  ddb:
+    table: ${ACCOUNTING_TABLE:accounting-processing}
+  sqs:
+    queue-url: ${ACCOUNTING_SQS_URL:}
+    poll-delay-ms: ${ACCOUNTING_POLL_DELAY_MS:2000}
