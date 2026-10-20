@@ -1,19 +1,21 @@
 package br.com.caseitau.auth.infrastructure;
 
-import java.math.BigDecimal;
-import java.time.Instant;
-import java.util.LinkedHashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
-
 import br.com.caseitau.auth.application.AuthorizationUseCase;
 import br.com.caseitau.auth.application.AuthorizationUseCase.ApiFailure;
 import br.com.caseitau.auth.application.AuthorizationUseCase.Command;
 import br.com.caseitau.auth.application.AuthorizationUseCase.Receipt;
-import br.com.caseitau.auth.application.AuthorizationUseCase.AuthorizationStore;
+import br.com.caseitau.auth.domain.Authorization;
+import br.com.caseitau.auth.domain.ContractLimit;
+import br.com.caseitau.auth.domain.Money;
+import br.com.caseitau.auth.domain.OperationType;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Repository;
@@ -21,194 +23,253 @@ import software.amazon.awssdk.services.dynamodb.DynamoDbClient;
 import software.amazon.awssdk.services.dynamodb.model.*;
 
 /**
- * Financial consistency boundary. All financial changes are confirmed by ONE
- * DynamoDB TransactWriteItems request. DynamoDB Streams must be configured
- * independently; this adapter does NOT call EventBridge directly.
- *
- * MVP: authorization with RESERVA only. No financial ledger postings.
+ * Outbound adapter. No business code calls AWS directly.
+ * Single contract's aggregate lives in one LIMIT item and is always changed
+ * with an atomic, conditional DynamoDB transaction.
  */
 @Repository
-public final class DynamoAuthorizationAdapter implements AuthorizationStore {
-    private final DynamoDbClient dynamo;
-    private final ObjectMapper json;
+public final class DynamoAuthorizationAdapter implements AuthorizationUseCase.AuthorizationStore {
+    private static final int MAX_ATTEMPTS = 5;
+    private final DynamoDbClient ddb;
+    private final ObjectMapper mapper;
     private final String table;
 
-    public DynamoAuthorizationAdapter(DynamoDbClient dynamo, ObjectMapper json,
+    public DynamoAuthorizationAdapter(DynamoDbClient ddb, ObjectMapper mapper,
                                       @Value("${app.ddb.table}") String table) {
-        this.dynamo = dynamo;
-        this.json = json;
-        this.table = table;
+        this.ddb = ddb; this.mapper = mapper; this.table = table;
     }
 
     @Override
-    public Receipt reserve(Command command, long amountMinorUnits, String payloadHash) {
-        String idemPk = "IDEMPOTENCY#" + command.idempotencyKey();
-        Map<String, AttributeValue> existing = read(idemPk, "REQUEST");
-        if (!existing.isEmpty()) {
-            return replay(existing, payloadHash);
-        }
+    public Receipt apply(Command command, OperationType operation, Money amount, String payloadHash) {
+        final String idemPk = "IDEMPOTENCY#" + command.idempotencyKey();
+        var idem = read(idemPk, "REQUEST");
+        if (!idem.isEmpty()) return replay(idem, payloadHash);
 
-        // Optimistic concurrency, including the exact resulting balance in the
-        // persisted replay response; bounded retries for independent requests.
-        for (int attempt = 0; attempt < 3; attempt++) {
-            var limit = read("CONTRACT#" + command.contractId(), "LIMIT");
-            if (limit.isEmpty()) {
-                throw new ApiFailure(HttpStatus.NOT_FOUND, "CONTRACT_NOT_FOUND", "Contrato não carregado na plataforma");
+        for (int attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+            idem = read(idemPk, "REQUEST");
+            if (!idem.isEmpty()) return replay(idem, payloadHash);
+
+            var limitItem = read("CONTRACT#" + command.contractId(), "LIMIT");
+            if (limitItem.isEmpty()) {
+                throw new ApiFailure(HttpStatus.NOT_FOUND, "CONTRACT_NOT_FOUND", "Contrato não encontrado");
             }
-            long available = number(limit, "availableMinorUnits");
-            long reserved = number(limit, "reservedMinorUnits");
-            long version = number(limit, "version");
-
-            if (available < amountMinorUnits) {
-                // TODO financial spec: store idempotent declines as well.
-                throw new ApiFailure(HttpStatus.PAYMENT_REQUIRED, "INSUFFICIENT_LIMIT", "Limite insuficiente");
+            ContractLimit before = fromLimit(limitItem);
+            if (!before.accountId().equals(command.accountId())) {
+                throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "ACCOUNT_MISMATCH", "Conta não corresponde ao contrato");
             }
 
-            final long newAvailable;
-            final long newReserved;
+            Authorization original = null;
+            if (operation == OperationType.ESTORNO) {
+                var originalItem = read("AUTH#" + command.originalAuthorizationId(), "META");
+                if (originalItem.isEmpty()) {
+                    throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "ORIGINAL_NOT_FOUND", "Autorização original não existe");
+                }
+                original = fromAuth(originalItem);
+                if (!original.contractId().equals(command.contractId())
+                        || original.amountMinorUnits() != amount.cents()
+                        || !originalItem.get("accountId").s().equals(command.accountId())) {
+                    throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "ORIGINAL_MISMATCH",
+                            "Estorno deve corresponder a contrato, conta e valor originais");
+                }
+                if (original.reversed()) {
+                    throw new ApiFailure(HttpStatus.CONFLICT, "ALREADY_REVERSED", "Autorização já estornada");
+                }
+            }
+
+            final ContractLimit next;
             try {
-                newAvailable = Math.subtractExact(available, amountMinorUnits);
-                newReserved = Math.addExact(reserved, amountMinorUnits);
-            } catch (ArithmeticException overflow) {
-                throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "LIMIT_OVERFLOW", "Overflow de limite");
+                next = switch (operation) {
+                    case RESERVA -> before.reserve(amount.cents());
+                    case DEBITO -> before.debit(amount.cents());
+                    case CREDITO -> before.credit(amount.cents());
+                    case ESTORNO -> before.reverse(original.type(), amount.cents());
+                };
+            } catch (ContractLimit.InsufficientLimit insufficient) {
+                persistDecline(idemPk, payloadHash, "INSUFFICIENT_LIMIT");
+                throw new ApiFailure(HttpStatus.PAYMENT_REQUIRED, "INSUFFICIENT_LIMIT", "Limite insuficiente");
+            } catch (ContractLimit.InvalidTransition invalid) {
+                throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_TRANSITION", invalid.getMessage());
             }
 
             String authId = UUID.randomUUID().toString();
             String eventId = UUID.randomUUID().toString();
-            String occurredAt = Instant.now().toString();
-            String payload = cloudEvent(command, authId, eventId, occurredAt,
-                    amountMinorUnits, newReserved);
-            var limitUpdate = Update.builder()
+            String instant = Instant.now().toString();
+            String eventType = switch (operation) {
+                case RESERVA, DEBITO -> "TransacaoAutorizada";
+                case CREDITO -> "LimiteAlterado";
+                case ESTORNO -> "TransacaoEstornada";
+            };
+
+            var updateLimit = Update.builder()
                     .tableName(table)
                     .key(key("CONTRACT#" + command.contractId(), "LIMIT"))
-                    .conditionExpression("attribute_exists(pk) AND #v = :version AND #available >= :amount")
-                    .updateExpression("SET #available = #available - :amount, " +
-                            "reservedMinorUnits = reservedMinorUnits + :amount, #v = #v + :one")
-                    .expressionAttributeNames(Map.of("#v", "version", "#available", "availableMinorUnits"))
+                    .conditionExpression("attribute_exists(pk) AND #v = :oldVersion AND #available = :oldAvailable")
+                    .updateExpression("SET #available = :newAvailable, #reserved = :newReserved, " +
+                            "#used = :newUsed, #v = :newVersion")
+                    .expressionAttributeNames(Map.of(
+                            "#v", "version", "#available", "availableMinorUnits",
+                            "#reserved", "reservedMinorUnits", "#used", "usedMinorUnits"))
                     .expressionAttributeValues(Map.of(
-                            ":version", n(version), ":amount", n(amountMinorUnits), ":one", n(1)))
+                            ":oldVersion", n(before.version()),
+                            ":oldAvailable", n(before.available()),
+                            ":newAvailable", n(next.available()),
+                            ":newReserved", n(next.reserved()),
+                            ":newUsed", n(next.used()),
+                            ":newVersion", n(next.version())))
                     .build();
 
-            var authorization = Put.builder().tableName(table).item(Map.ofEntries(
-                    Map.entry("pk", s("AUTH#" + authId)), Map.entry("sk", s("META")),
-                    Map.entry("entityType", s("AUTH")), Map.entry("authorizationId", s(authId)),
-                    Map.entry("contractId", s(command.contractId())), Map.entry("accountId", s(command.accountId())),
-                    Map.entry("amountMinorUnits", n(amountMinorUnits)), Map.entry("currency", s("BRL")),
-                    Map.entry("reservationState", s("RESERVED")),
-                    Map.entry("reservedAfterMinorUnits", n(newReserved)),
-                    Map.entry("createdAt", s(occurredAt))))
-                    .conditionExpression("attribute_not_exists(pk)").build();
+            Map<String,AttributeValue> authItem = new HashMap<>();
+            authItem.put("pk", s("AUTH#" + authId)); authItem.put("sk", s("META"));
+            authItem.put("entityType", s("AUTH")); authItem.put("authorizationId", s(authId));
+            authItem.put("contractId", s(command.contractId())); authItem.put("accountId", s(command.accountId()));
+            authItem.put("operation", s(operation.name())); authItem.put("amountMinorUnits", n(amount.cents()));
+            authItem.put("reservedAfterMinorUnits", n(next.reserved())); authItem.put("availableAfterMinorUnits", n(next.available()));
+            authItem.put("reversed", bool(false)); authItem.put("createdAt", s(instant));
+            authItem.put("status", s(operation == OperationType.ESTORNO ? "REVERSED" : "APPROVED"));
+            if (original != null) authItem.put("originalAuthorizationId", s(original.id()));
+            var putAuth = putNew(authItem);
 
-            var idem = Put.builder().tableName(table).item(Map.of(
-                    "pk", s(idemPk), "sk", s("REQUEST"), "entityType", s("IDEMPOTENCY"),
-                    "payloadHash", s(payloadHash), "authorizationId", s(authId),
-                    "reservedAfterMinorUnits", n(newReserved),
-                    "availableAfterMinorUnits", n(newAvailable),
-                    "operation", s("RESERVA")))
-                    .conditionExpression("attribute_not_exists(pk)").build();
+            Map<String,AttributeValue> idemItem = new HashMap<>();
+            idemItem.put("pk", s(idemPk)); idemItem.put("sk", s("REQUEST"));
+            idemItem.put("entityType", s("IDEMPOTENCY")); idemItem.put("payloadHash", s(payloadHash));
+            idemItem.put("authorizationId", s(authId)); idemItem.put("outcome", s("APPROVED"));
+            idemItem.put("operation", s(operation.name()));
+            idemItem.put("reservedAfterMinorUnits", n(next.reserved()));
+            idemItem.put("availableAfterMinorUnits", n(next.available()));
+            var putIdem = putNew(idemItem);
 
-            var outbox = Put.builder().tableName(table).item(Map.of(
-                    "pk", s("OUTBOX#" + eventId), "sk", s("EVENT"), "entityType", s("OUTBOX"),
-                    "eventId", s(eventId), "eventType", s("TransacaoAutorizada"),
-                    "occurredAt", s(occurredAt), "payload", s(payload),
-                    "contractId", s(command.contractId())))
-                    .conditionExpression("attribute_not_exists(pk)").build();
+            Map<String,AttributeValue> outbox = new HashMap<>();
+            outbox.put("pk", s("OUTBOX#" + eventId)); outbox.put("sk", s("EVENT"));
+            outbox.put("entityType", s("OUTBOX")); outbox.put("eventId", s(eventId));
+            outbox.put("eventType", s(eventType)); outbox.put("eventVersion", s("1.0"));
+            outbox.put("occurredAt", s(instant));
+            outbox.put("authorizationId", s(authId));
+            outbox.put("contractId", s(command.contractId()));
+            outbox.put("accountId", s(command.accountId()));
+            outbox.put("operation", s(operation.name()));
+            outbox.put("amountDecimal", s(amount.decimal().toPlainString()));
+            outbox.put("reservedDecimal", s(MoneyDecimal.toString(next.reserved())));
+            outbox.put("correlationId", s(command.correlationId()));
+            outbox.put("eventPayload", s(eventJson(eventId, eventType, command, authId, amount, next, instant)));
+            var putEvent = putNew(outbox);
 
+            List<TransactWriteItem> changes = new ArrayList<>();
+            changes.add(TransactWriteItem.builder().update(updateLimit).build());
+            changes.add(TransactWriteItem.builder().put(putAuth).build());
+            changes.add(TransactWriteItem.builder().put(putIdem).build());
+            changes.add(TransactWriteItem.builder().put(putEvent).build());
+            if (original != null) {
+                changes.add(TransactWriteItem.builder().update(Update.builder()
+                        .tableName(table).key(key("AUTH#" + original.id(), "META"))
+                        .conditionExpression("attribute_exists(pk) AND reversed = :false")
+                        .updateExpression("SET reversed = :true, reversedBy = :reversal")
+                        .expressionAttributeValues(Map.of(":false", bool(false), ":true", bool(true),
+                                ":reversal", s(authId)))
+                        .build()).build());
+            }
             try {
-                dynamo.transactWriteItems(TransactWriteItemsRequest.builder()
+                ddb.transactWriteItems(TransactWriteItemsRequest.builder()
                         .clientRequestToken(UUID.randomUUID().toString())
-                        .transactItems(List.of(
-                                TransactWriteItem.builder().update(limitUpdate).build(),
-                                TransactWriteItem.builder().put(authorization).build(),
-                                TransactWriteItem.builder().put(idem).build(),
-                                TransactWriteItem.builder().put(outbox).build()))
-                        .build());
-                return new Receipt(authId, newReserved, newAvailable, false);
-            } catch (TransactionCanceledException cancelled) {
-                // Same key in another request? Return original result, not a new reservation.
-                var currentIdem = read(idemPk, "REQUEST");
-                if (!currentIdem.isEmpty()) {
-                    return replay(currentIdem, payloadHash);
+                        .transactItems(changes).build());
+                return new Receipt(authId, next.reserved(), next.available(), false, operation);
+            } catch (TransactionCanceledException conflict) {
+                var completed = read(idemPk, "REQUEST");
+                if (!completed.isEmpty()) return replay(completed, payloadHash);
+                if (attempt == MAX_ATTEMPTS - 1) {
+                    throw new ApiFailure(HttpStatus.CONFLICT, "CONCURRENT_UPDATE", "Conflito de escrita no contrato");
                 }
-                // Could be version contention, a depleted limit or a transient
-                // transaction conflict. Re-read on next attempt.
-                if (attempt == 2) {
-                    var latest = read("CONTRACT#" + command.contractId(), "LIMIT");
-                    if (!latest.isEmpty() && number(latest, "availableMinorUnits") < amountMinorUnits) {
-                        throw new ApiFailure(HttpStatus.PAYMENT_REQUIRED, "INSUFFICIENT_LIMIT", "Limite insuficiente após concorrência");
-                    }
-                    throw new ApiFailure(HttpStatus.CONFLICT, "CONCURRENT_UPDATE", "Conflito de atualização; tente novamente");
-                }
+                // Stale version or original authorization reversed by another request.
+                // Next iteration re-reads the entire aggregate and original state.
             }
         }
-        throw new ApiFailure(HttpStatus.CONFLICT, "CONCURRENT_UPDATE", "Tentativas de concorrência esgotadas");
+        throw new ApiFailure(HttpStatus.CONFLICT, "CONCURRENT_UPDATE", "Número máximo de tentativas atingido");
     }
 
-    private Receipt replay(Map<String, AttributeValue> item, String payloadHash) {
-        if (!text(item, "payloadHash").equals(payloadHash)) {
-            throw new ApiFailure(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED",
-                    "Idempotency-Key já utilizada com payload diferente");
+    private void persistDecline(String idemPk, String requestHash, String reason) {
+        try {
+            ddb.putItem(PutItemRequest.builder().tableName(table)
+                    .item(Map.of(
+                            "pk", s(idemPk), "sk", s("REQUEST"),
+                            "entityType", s("IDEMPOTENCY"), "payloadHash", s(requestHash),
+                            "outcome", s("DECLINED"), "reason", s(reason)))
+                    .conditionExpression("attribute_not_exists(pk)").build());
+        } catch (ConditionalCheckFailedException alreadyStored) {
+            // Only concurrent same-key writers can cause this; retry path returns
+            // the exact existing result on the next HTTP call.
+            var stored = read(idemPk, "REQUEST");
+            if (!stored.isEmpty()) replay(stored, requestHash);
         }
-        return new Receipt(text(item, "authorizationId"),
-                number(item, "reservedAfterMinorUnits"),
-                number(item, "availableAfterMinorUnits"), true);
     }
 
-    private String cloudEvent(Command cmd, String authId, String eventId, String occurredAt,
-                              long amountMinorUnits, long newReserved) {
-        Map<String, Object> data = new LinkedHashMap<>();
+    private Receipt replay(Map<String,AttributeValue> item, String hash) {
+        if (!txt(item,"payloadHash").equals(hash)) {
+            throw new ApiFailure(HttpStatus.CONFLICT, "IDEMPOTENCY_KEY_REUSED", "A mesma chave foi utilizada com outro payload");
+        }
+        if ("DECLINED".equals(txt(item,"outcome"))) {
+            throw new ApiFailure(HttpStatus.PAYMENT_REQUIRED, txt(item,"reason"), "Operação previamente recusada");
+        }
+        return new Receipt(txt(item, "authorizationId"),
+                number(item, "reservedAfterMinorUnits"), number(item, "availableAfterMinorUnits"),
+                true, OperationType.valueOf(txt(item, "operation")));
+    }
+
+    private Map<String,AttributeValue> read(String pk, String sk) {
+        return ddb.getItem(GetItemRequest.builder().tableName(table).key(key(pk,sk))
+                .consistentRead(true).build()).item();
+    }
+    private static ContractLimit fromLimit(Map<String,AttributeValue> item) {
+        return new ContractLimit(txt(item,"contractId"), txt(item,"accountId"),
+                number(item,"totalMinorUnits"), number(item,"availableMinorUnits"),
+                number(item,"reservedMinorUnits"), number(item,"usedMinorUnits"), number(item,"version"));
+    }
+    private static Authorization fromAuth(Map<String,AttributeValue> item) {
+        return new Authorization(txt(item,"authorizationId"), txt(item,"contractId"),
+                OperationType.valueOf(txt(item,"operation")), number(item,"amountMinorUnits"),
+                item.containsKey("reversed") && item.get("reversed").bool(),
+                item.containsKey("originalAuthorizationId") ? txt(item,"originalAuthorizationId") : null);
+    }
+    private Put putNew(Map<String,AttributeValue> item) {
+        return Put.builder().tableName(table).item(item).conditionExpression("attribute_not_exists(pk)").build();
+    }
+    private String eventJson(String eventId, String eventType, Command request, String authId,
+                             Money amount, ContractLimit next, String occurredAt) {
+        Map<String,Object> data = new HashMap<>();
         data.put("event_id", eventId);
-        data.put("event_type", "TransacaoAutorizada");
+        data.put("event_type", eventType);
         data.put("event_version", "1.0");
         data.put("occurred_at", occurredAt);
         data.put("id_autorizacao", authId);
-        data.put("id_contrato", cmd.contractId());
-        data.put("valor", BigDecimal.valueOf(amountMinorUnits, 2).toPlainString());
-        data.put("saldo_reservado", BigDecimal.valueOf(newReserved, 2).toPlainString());
-        data.put("correlation_id", cmd.correlationId());
-        Map<String, Object> cloudEvent = new LinkedHashMap<>();
-        cloudEvent.put("specversion", "1.0");
-        cloudEvent.put("id", eventId);
-        cloudEvent.put("type", "TransacaoAutorizada");
-        cloudEvent.put("source", "/authorization-limit-service");
-        cloudEvent.put("time", occurredAt);
-        cloudEvent.put("datacontenttype", "application/json");
-        cloudEvent.put("data", data);
+        data.put("id_contrato", request.contractId());
+        data.put("tipo_operacao", request.operation());
+        data.put("valor", amount.decimal().toPlainString());
+        data.put("saldo_reservado", MoneyDecimal.toString(next.reserved()));
+        data.put("correlation_id", request.correlationId());
         try {
-            return json.writeValueAsString(cloudEvent);
-        } catch (JsonProcessingException ex) {
-            throw new IllegalStateException("Falha ao serializar evento", ex);
+            return mapper.writeValueAsString(Map.of(
+                    "specversion", "1.0", "id", eventId, "type", eventType,
+                    "source", "/pod99/authorization-limit-service", "time", occurredAt,
+                    "datacontenttype", "application/json", "data", data));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Falha na serialização do evento", e);
         }
     }
-
-    private Map<String, AttributeValue> read(String pk, String sk) {
-        return dynamo.getItem(GetItemRequest.builder().tableName(table)
-                .key(key(pk, sk)).consistentRead(true).build()).item();
-    }
-
-    private static Map<String, AttributeValue> key(String pk, String sk) {
+    private static Map<String,AttributeValue> key(String pk, String sk) {
         return Map.of("pk", s(pk), "sk", s(sk));
     }
-
-    private static AttributeValue s(String v) {
-        return AttributeValue.builder().s(v).build();
+    private static AttributeValue s(String value) {return AttributeValue.builder().s(value).build();}
+    private static AttributeValue n(long value) {return AttributeValue.builder().n(Long.toString(value)).build();}
+    private static AttributeValue bool(boolean value) {return AttributeValue.builder().bool(value).build();}
+    private static long number(Map<String,AttributeValue> item, String attr) {
+        if (!item.containsKey(attr) || item.get(attr).n() == null) throw new IllegalStateException("Atributo ausente: "+attr);
+        return Long.parseLong(item.get(attr).n());
     }
-
-    private static AttributeValue n(long v) {
-        return AttributeValue.builder().n(Long.toString(v)).build();
+    private static String txt(Map<String,AttributeValue> item, String attr) {
+        if (!item.containsKey(attr) || item.get(attr).s() == null) throw new IllegalStateException("Atributo ausente: "+attr);
+        return item.get(attr).s();
     }
-
-    private static long number(Map<String, AttributeValue> item, String key) {
-        if (!item.containsKey(key) || item.get(key).n() == null) {
-            throw new IllegalStateException("Item sem atributo numérico: " + key);
+    private static final class MoneyDecimal {
+        private static String toString(long cents) {
+            return java.math.BigDecimal.valueOf(cents,2).toPlainString();
         }
-        return Long.parseLong(item.get(key).n());
-    }
-
-    private static String text(Map<String, AttributeValue> item, String key) {
-        if (!item.containsKey(key) || item.get(key).s() == null) {
-            throw new IllegalStateException("Item sem atributo string: " + key);
-        }
-        return item.get(key).s();
     }
 }
