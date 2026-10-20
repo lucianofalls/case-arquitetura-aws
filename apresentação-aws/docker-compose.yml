@@ -1,0 +1,56 @@
+services:
+  dynamodb:
+    image: amazon/dynamodb-local:2.6.0
+    command: ["-jar", "DynamoDBLocal.jar", "-inMemory", "-sharedDb"]
+    ports: ["8000:8000"]
+    networks: [pod99]
+  dynamodb-init:
+    image: amazon/aws-cli:2.28.10
+    entrypoint: ["/bin/sh", "/scripts/bootstrap-ddb-local.sh"]
+    volumes:
+      - ./scripts:/scripts:ro
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      AWS_DEFAULT_REGION: us-east-1
+      DDB_ENDPOINT: http://dynamodb:8000
+      DDB_TABLE: financial-authorization
+      ACCOUNTING_TABLE: accounting-processing
+    depends_on:
+      - dynamodb
+    networks: [pod99]
+  authorization-limit-service:
+    build: ./services/authorization-limit-service
+    ports: ["8080:8080"]
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      DDB_ENDPOINT: http://dynamodb:8000
+      DDB_TABLE: financial-authorization
+    depends_on:
+      dynamodb-init:
+        condition: service_completed_successfully
+    networks: [pod99]
+  core-banking-acl-service:
+    build: ./services/core-banking-acl-service
+    ports: ["8082:8082"]
+    environment:
+      SPRING_PROFILES_ACTIVE: demo
+    networks: [pod99]
+  accounting-service:
+    build: ./services/accounting-service
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: local
+      AWS_SECRET_ACCESS_KEY: local
+      ACCOUNTING_TABLE: accounting-processing
+      ACCOUNTING_SQS_URL: ""
+    depends_on:
+      dynamodb-init:
+        condition: service_completed_successfully
+    networks: [pod99]
+networks:
+  pod99:
+    driver: bridge
