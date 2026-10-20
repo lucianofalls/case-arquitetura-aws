@@ -1,56 +1,75 @@
 package br.com.caseitau.auth.application;
 
+import br.com.caseitau.auth.domain.Money;
+import br.com.caseitau.auth.domain.OperationType;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import java.math.BigDecimal;
-import java.math.RoundingMode;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
+import java.util.Map;
 import java.util.UUID;
-
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 /**
- * Use case: authorize a LIMIT RESERVATION only.
- * DEBITO, CREDITO and ESTORNO require independent financial state machines.
+ * Application orchestration: only business invariants and ports.
+ * No DynamoDB and no messaging dependencies.
  */
 @Service
 public final class AuthorizationUseCase {
     private final AuthorizationStore store;
+    private static final ObjectMapper CANONICAL = new ObjectMapper()
+            .enable(SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS);
 
-    public AuthorizationUseCase(AuthorizationStore store) {
-        this.store = store;
-    }
+    public AuthorizationUseCase(AuthorizationStore store) { this.store = store; }
 
     public Receipt execute(Command command) {
         if (command.idempotencyKey() == null) {
             throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_IDEMPOTENCY_KEY", "Idempotency-Key obrigatório");
         }
-        if (!"RESERVA".equals(command.operation())) {
-            if ("DEBITO".equals(command.operation()) || "CREDITO".equals(command.operation()) || "ESTORNO".equals(command.operation())) {
-                throw new ApiFailure(HttpStatus.NOT_IMPLEMENTED, "OPERATION_NOT_IMPLEMENTED", "Operação prevista no case, mas ainda não implementada");
-            }
-            throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_OPERATION", "Tipo de operação inválido");
+        if (command.contractId() == null || command.contractId().isBlank() ||
+            command.accountId() == null || command.accountId().isBlank()) {
+            throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_REQUEST", "Conta e contrato são obrigatórios");
         }
-        if (!"BRL".equals(command.currency())) {
-            throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_CURRENCY", "Primeiro slice suporta BRL");
-        }
-        if (command.amount() == null || command.amount().signum() <= 0) {
-            throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_AMOUNT", "Valor deve ser positivo");
-        }
-
-        final long amountMinorUnits;
+        final OperationType type;
         try {
-            BigDecimal money = command.amount().setScale(2, RoundingMode.UNNECESSARY);
-            amountMinorUnits = money.movePointRight(2).longValueExact();
-        } catch (ArithmeticException ex) {
-            throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_AMOUNT", "Valor deve ser decimal(18,2)");
+            type = OperationType.valueOf(command.operation());
+        } catch (RuntimeException ex) {
+            throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_OPERATION", "Operação inválida");
         }
-        // The idempotency digest includes all business arguments, not just the amount.
-        String canonical = command.contractId() + "|" + command.accountId() + "|" + amountMinorUnits
-                + "|" + command.currency() + "|" + command.operation();
-        return store.reserve(command, amountMinorUnits, sha256(canonical));
+        if (type == OperationType.ESTORNO && (command.originalAuthorizationId() == null
+                || command.originalAuthorizationId().isBlank())) {
+            throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "ORIGINAL_REQUIRED", "Estorno exige id_autorizacao_original");
+        }
+        if (type != OperationType.ESTORNO && command.originalAuthorizationId() != null) {
+            throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_ORIGINAL", "Referência original válida apenas para ESTORNO");
+        }
+        final Money amount;
+        try {
+            amount = Money.of(command.amount(), command.currency());
+        } catch (RuntimeException ex) {
+            throw new ApiFailure(HttpStatus.UNPROCESSABLE_ENTITY, "INVALID_AMOUNT", ex.getMessage());
+        }
+        try {
+            Map<String,Object> canonical = Map.of(
+                    "contractId", command.contractId(),
+                    "accountId", command.accountId(),
+                    "amount", amount.cents(),
+                    "currency", amount.currency(),
+                    "operation", type.name(),
+                    "originalId", command.originalAuthorizationId() == null ? "" : command.originalAuthorizationId(),
+                    "merchantId", command.merchantId() == null ? "" : command.merchantId(),
+                    "metadata", command.metadata() == null ? Map.of() : command.metadata());
+            String requestHash = sha256(CANONICAL.writeValueAsString(canonical));
+            return store.apply(command, type, amount, requestHash);
+        } catch (ApiFailure e) {
+            throw e;
+        } catch (Exception e) {
+            throw new IllegalStateException("Falha ao canonicalizar solicitação", e);
+        }
     }
 
     static String sha256(String content) {
@@ -63,27 +82,29 @@ public final class AuthorizationUseCase {
     }
 
     public record Command(String contractId, String accountId, BigDecimal amount, String currency,
-                          String operation, UUID idempotencyKey, String correlationId) {
+                          String operation, UUID idempotencyKey, String correlationId,
+                          String originalAuthorizationId, String merchantId, Map<String, Object> metadata) {
+        public Command(String contractId, String accountId, BigDecimal amount, String currency,
+                       String operation, UUID idempotencyKey, String correlationId) {
+            this(contractId, accountId, amount, currency, operation, idempotencyKey, correlationId,
+                    null, null, Map.of());
+        }
     }
 
-    public record Receipt(String authorizationId, long reservedAfterMinorUnits, long availableAfterMinorUnits,
-                          boolean replayed) {
-    }
+    public record Receipt(String authorizationId, long reservedAfterMinorUnits,
+                          long availableAfterMinorUnits, boolean replayed, OperationType operationType) {}
 
+    /** Outbound port. Infrastructure is responsible for concurrency and durable replay. */
     public interface AuthorizationStore {
-        Receipt reserve(Command command, long amountMinorUnits, String payloadHash);
+        Receipt apply(Command command, OperationType type, Money money, String payloadHash);
     }
 
     public static final class ApiFailure extends RuntimeException {
         private final HttpStatus status;
         private final String code;
-
-        public ApiFailure(HttpStatus status, String code, String message) {
-            super(message);
-            this.status = status;
-            this.code = code;
+        public ApiFailure(HttpStatus status, String code, String detail) {
+            super(detail); this.status = status; this.code = code;
         }
-
         public HttpStatus status() { return status; }
         public String code() { return code; }
     }
