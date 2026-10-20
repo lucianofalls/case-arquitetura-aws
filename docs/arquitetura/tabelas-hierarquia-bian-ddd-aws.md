@@ -95,7 +95,7 @@ DynamoDB: TransactWriteItems (LIMIT + AUTH + IDEMPOTENCY + OUTBOX)
            └─→ DynamoDB Streams habilitado
                     ↓
                 EventBridge Pipes
-                - filtro: registros INSERT do tipo OUTBOX
+                - filtro: NewImage contendo item do tipo OUTBOX (Outbox imutável)
                 - transformação de payload de negócio
                     ↓
                 EventBridge custom event bus
