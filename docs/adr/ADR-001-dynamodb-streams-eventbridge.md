@@ -16,7 +16,7 @@ O BIAN fornece referências para Transaction Authorization, Position Keeping, Fi
 - **Serviço crítico:** `authorization-limit-service`, com módulos DDD `authorization` e `limits`, e **uma única propriedade transacional dos dados**.
 - **Persistência do núcleo:** tabela DynamoDB `financial-authorization` (nome candidato) com itens lógicos `LIMIT`, `AUTH`, `IDEMPOTENCY` e `OUTBOX`.
 - **Transação de aprovação:** `TransactWriteItems` com atualização condicional do limite, `Put` da autorização com representação da reserva, `Put` idempotência e `Put` Outbox, todos no mesmo commit. O valor monetário é armazenado como inteiro na unidade mínima.
-- **Publicação:** **DynamoDB Streams (habilitado) → EventBridge Pipes (filtro + transformação dos registros OUTBOX) → EventBridge custom event bus → SQS** por consumidor.
+- **Publicação:** **DynamoDB Streams (NEW_IMAGE habilitado) → EventBridge Pipes (filtro por item OUTBOX em NewImage + transformação) → EventBridge custom event bus → SQS** por consumidor.
 - **Consumo:** `accounting-service` com persistência/inbox própria, consumidor idempotente; outros consumidores ligados ao EventBridge por regras/SQS.
 - **Integração legada:** `core-banking-acl-service` com responsabilidade exclusiva de adaptação de modelos/protocolos.
 
@@ -32,6 +32,7 @@ Esta ADR **não** afirma que os serviços foram implementados nem que testes de 
 
 ## Restrições e riscos assumidos
 
+- **Filtro correto do Pipes:** Outbox deve ser imutável e identificável por atributo do `dynamodb.NewImage`. O atributo `eventName` não é suportado como filtro em EventBridge Pipes. Ver [event filtering](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-pipes-event-filtering.html).
 - **Não é publicação automática DynamoDB → EventBridge:** Streams e Pipes exigem habilitação/configuração.
 - **Não é exactly-once ponta a ponta:** retries e duplicidade exigem inbox/deduplicação, reconciliação e evolução de esquema de eventos.
 - **DynamoDB Streams: retenção de aproximadamente 24 horas.** A Outbox persistida precisará de retenção e processo de reconciliação/republicação para falhas prolongadas.
