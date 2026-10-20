@@ -1,0 +1,111 @@
+openapi: 3.0.3
+info:
+  title: POD99 - Gestão de Limites e Autorização
+  version: 1.0.0
+  description: |
+    Contrato do case. Estados e semântica detalhada de crédito, débito e estorno
+    são hipóteses arquiteturais até homologação do domínio bancário.
+servers:
+  - url: https://{api-id}.execute-api.{region}.amazonaws.com/{stage}
+    variables:
+      api-id: {default: example}
+      region: {default: us-east-1}
+      stage: {default: demo}
+security: [{cognito: []}]
+paths:
+  /v1/contratos/{id_contrato}/autorizacoes:
+    post:
+      summary: Autorizar reserva, débito, crédito ou estorno
+      operationId: createAuthorization
+      tags: [Authorization]
+      parameters:
+        - name: id_contrato
+          in: path
+          required: true
+          schema: {type: string, minLength: 1}
+        - name: Idempotency-Key
+          in: header
+          required: true
+          schema: {type: string, format: uuid}
+          description: Identifica a intenção; reutilização com payload distinto gera 409.
+        - name: X-Correlation-Id
+          in: header
+          schema: {type: string}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/AuthorizationRequest'}
+            examples:
+              reserva:
+                summary: Reservar R$ 5.000
+                value: {id_conta: 'conta-1', valor: 5000.00, moeda: BRL, tipo_operacao: RESERVA}
+              estorno:
+                summary: Estornar uma reserva de R$ 5.000
+                value: {id_conta: 'conta-1', valor: 5000.00, moeda: BRL, tipo_operacao: ESTORNO, id_autorizacao_original: 'uuid-original'}
+      responses:
+        '201':
+          description: Nova operação confirmada
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/AuthorizationResponse'}}
+        '200':
+          description: Replay idempotente de operação confirmada
+          content:
+            application/json: {schema: {$ref: '#/components/schemas/AuthorizationResponse'}}
+        '402':
+          description: Limite insuficiente (recusa persistida para replay com o mesmo status)
+          content:
+            application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}
+        '404':
+          description: Contrato ausente
+          content:
+            application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}
+        '409':
+          description: Conflito de concorrência ou chave idempotente reutilizada com payload diferente
+          content:
+            application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}
+        '422':
+          description: Regra ou payload inválido
+          content:
+            application/problem+json: {schema: {$ref: '#/components/schemas/ProblemDetails'}}
+        '429':
+          description: Throttling
+        '503':
+          description: Dependência temporariamente indisponível
+components:
+  securitySchemes:
+    cognito:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+  schemas:
+    AuthorizationRequest:
+      type: object
+      required: [id_conta, valor, moeda, tipo_operacao]
+      additionalProperties: false
+      properties:
+        id_conta: {type: string, minLength: 1}
+        valor: {type: number, multipleOf: 0.01, minimum: 0.01, description: 'decimal(18,2)'}
+        moeda: {type: string, example: BRL}
+        tipo_operacao: {type: string, enum: [DEBITO, CREDITO, RESERVA, ESTORNO]}
+        id_autorizacao_original: {type: string, description: 'Obrigatório para ESTORNO'}
+        id_estabelecimento: {type: string}
+        metadata: {type: object, additionalProperties: true}
+    AuthorizationResponse:
+      type: object
+      required: [id_autorizacao, saldo_reservado, limite_disponivel, tipo_operacao, replay]
+      properties:
+        id_autorizacao: {type: string}
+        saldo_reservado: {type: number}
+        limite_disponivel: {type: number}
+        tipo_operacao: {type: string, enum: [DEBITO, CREDITO, RESERVA, ESTORNO]}
+        replay: {type: boolean}
+    ProblemDetails:
+      type: object
+      properties:
+        type: {type: string}
+        title: {type: string}
+        status: {type: integer}
+        detail: {type: string}
+        instance: {type: string}
+        code: {type: string}

@@ -1,0 +1,75 @@
+asyncapi: 3.0.0
+info:
+  title: POD99 Financial Events
+  version: 1.0.0
+  description: |
+    Envelope CloudEvents 1.0 enviado via Outbox DynamoDB → Streams → EventBridge Pipes
+    → EventBridge custom bus → SQS por consumidor. Semântica de entrega at-least-once.
+servers:
+  awsEventBridge:
+    host: '{region}.amazonaws.com'
+    protocol: aws-eventbridge
+    variables:
+      region:
+        default: us-east-1
+channels:
+  authorizedTransactions:
+    address: 'pod99-case-domain-events'
+    messages:
+      TransacaoAutorizada:
+        $ref: '#/components/messages/TransacaoAutorizada'
+  limitAdjustments:
+    address: 'pod99-case-domain-events'
+    messages:
+      LimiteAlterado:
+        $ref: '#/components/messages/LimiteAlterado'
+  transactionReversals:
+    address: 'pod99-case-domain-events'
+    messages:
+      TransacaoEstornada:
+        $ref: '#/components/messages/TransacaoEstornada'
+operations:
+  publishAuthorization:
+    action: send
+    channel:
+      $ref: '#/channels/authorizedTransactions'
+    messages:
+      - $ref: '#/channels/authorizedTransactions/messages/TransacaoAutorizada'
+components:
+  messages:
+    TransacaoAutorizada:
+      name: TransacaoAutorizada
+      contentType: application/cloudevents+json
+      payload: {$ref: '#/components/schemas/CloudEvent'}
+    LimiteAlterado:
+      name: LimiteAlterado
+      contentType: application/cloudevents+json
+      payload: {$ref: '#/components/schemas/CloudEvent'}
+    TransacaoEstornada:
+      name: TransacaoEstornada
+      contentType: application/cloudevents+json
+      payload: {$ref: '#/components/schemas/CloudEvent'}
+  schemas:
+    CloudEvent:
+      type: object
+      required: [specversion, id, source, type, time, datacontenttype, data]
+      properties:
+        specversion: {type: string, const: '1.0'}
+        id: {type: string, format: uuid}
+        source: {type: string}
+        type: {type: string, enum: [TransacaoAutorizada, LimiteAlterado, TransacaoEstornada]}
+        time: {type: string, format: date-time}
+        datacontenttype: {type: string, const: application/json}
+        data: {$ref: '#/components/schemas/EventData'}
+    EventData:
+      type: object
+      required: [event_id, id_autorizacao, id_contrato, valor, saldo_reservado, correlation_id]
+      properties:
+        event_id: {type: string, format: uuid}
+        id_autorizacao: {type: string}
+        id_contrato: {type: string}
+        valor: {type: string, pattern: '^[0-9]+[.][0-9]{2}$'}
+        saldo_reservado: {type: string}
+        correlation_id: {type: string}
+        trace_id: {type: string}
+        tipo_operacao: {type: string}
