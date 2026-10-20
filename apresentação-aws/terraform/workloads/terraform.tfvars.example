@@ -1,0 +1,8 @@
+region = "us-east-1"
+cluster_name = "pod99-case-eks"
+authorization_image = "ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/pod99-case/authorization-limit-service:COMMIT_SHA"
+accounting_image = "ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/pod99-case/accounting-service:COMMIT_SHA"
+acl_image = "ACCOUNT.dkr.ecr.us-east-1.amazonaws.com/pod99-case/core-banking-acl-service:COMMIT_SHA"
+authorization_table = "pod99-case-financial-authorization"
+accounting_table = "pod99-case-accounting-processing"
+accounting_queue_url = "https://sqs.us-east-1.amazonaws.com/ACCOUNT/pod99-case-accounting"
