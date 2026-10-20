@@ -78,7 +78,9 @@ resource "aws_cloudwatch_log_group" "api" {
   retention_in_days = 30
 }
 data "aws_iam_policy_document" "api_logging_trust" {
-  statement { actions=["sts:AssumeRole"];principals{type="Service";identifiers=["apigateway.amazonaws.com"]} }
+  statement { actions=["sts:AssumeRole"]
+principals{type="Service"
+identifiers=["apigateway.amazonaws.com"]} }
 }
 resource "aws_iam_role" "api_logging" {
   count = local.edge_ready ? 1 : 0
@@ -142,18 +144,24 @@ resource "aws_wafv2_web_acl" "api" {
     priority = 0
     action { block {} }
     statement {
-      rate_based_statement { limit = 2000; aggregate_key_type = "IP" }
+      rate_based_statement { limit = 2000
+ aggregate_key_type = "IP" }
     }
-    visibility_config { cloudwatch_metrics_enabled=true; metric_name="RateLimit"; sampled_requests_enabled=true }
+    visibility_config { cloudwatch_metrics_enabled=true
+ metric_name="RateLimit"
+ sampled_requests_enabled=true }
   }
   rule {
     name = "AWSManagedRulesCommon"
     priority = 1
     override_action { none {} }
     statement {
-      managed_rule_group_statement {name="AWSManagedRulesCommonRuleSet"; vendor_name="AWS"}
+      managed_rule_group_statement {name="AWSManagedRulesCommonRuleSet"
+ vendor_name="AWS"}
     }
-    visibility_config {cloudwatch_metrics_enabled=true;metric_name="AWSManagedRulesCommon";sampled_requests_enabled=true}
+    visibility_config {cloudwatch_metrics_enabled=true
+metric_name="AWSManagedRulesCommon"
+sampled_requests_enabled=true}
   }
 }
 resource "aws_wafv2_web_acl_association" "api" {

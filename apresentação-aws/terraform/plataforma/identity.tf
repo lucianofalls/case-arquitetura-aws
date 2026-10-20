@@ -1,7 +1,8 @@
 data "aws_iam_policy_document" "pod_trust" {
   statement {
     actions=["sts:AssumeRole","sts:TagSession"]
-    principals {type="Service";identifiers=["pods.eks.amazonaws.com"]}
+    principals {type="Service"
+identifiers=["pods.eks.amazonaws.com"]}
   }
 }
 resource "aws_iam_role" "authorization" {

@@ -34,10 +34,13 @@ data "aws_iam_policy_document" "queue" {
   statement {
     sid = "EventBridgeMaySend"
     effect = "Allow"
-    principals { type = "Service"; identifiers = ["events.amazonaws.com"] }
+    principals { type = "Service"
+ identifiers = ["events.amazonaws.com"] }
     actions = ["sqs:SendMessage"]
     resources = [aws_sqs_queue.consumer[each.key].arn]
-    condition { test = "ArnEquals"; variable = "aws:SourceArn"; values = [aws_cloudwatch_event_rule.consumer[each.key].arn] }
+    condition { test = "ArnEquals"
+ variable = "aws:SourceArn"
+ values = [aws_cloudwatch_event_rule.consumer[each.key].arn] }
   }
 }
 resource "aws_sqs_queue_policy" "consumer" {
@@ -45,7 +48,8 @@ resource "aws_sqs_queue_policy" "consumer" {
   queue_url = aws_sqs_queue.consumer[each.key].id
   policy = data.aws_iam_policy_document.queue[each.key].json
 }
-resource "aws_sns_topic" "notifications" { name = "${var.name}-notifications"; fifo_topic = false }
+resource "aws_sns_topic" "notifications" { name = "${var.name}-notifications"
+ fifo_topic = false }
 resource "aws_sqs_queue" "notifications" {
   name = "${var.name}-notifications"
   sqs_managed_sse_enabled = true
@@ -63,10 +67,13 @@ resource "aws_cloudwatch_event_target" "notifications" {
 data "aws_iam_policy_document" "sns_eventbridge" {
   statement {
     effect="Allow"
-    principals {type="Service"; identifiers=["events.amazonaws.com"]}
+    principals {type="Service"
+ identifiers=["events.amazonaws.com"]}
     actions=["sns:Publish"]
     resources=[aws_sns_topic.notifications.arn]
-    condition {test="ArnEquals"; variable="aws:SourceArn"; values=[aws_cloudwatch_event_rule.notifications.arn]}
+    condition {test="ArnEquals"
+ variable="aws:SourceArn"
+ values=[aws_cloudwatch_event_rule.notifications.arn]}
   }
 }
 resource "aws_sns_topic_policy" "notifications" {
@@ -76,10 +83,13 @@ resource "aws_sns_topic_policy" "notifications" {
 data "aws_iam_policy_document" "notifications_queue" {
   statement {
     effect="Allow"
-    principals {type="Service"; identifiers=["sns.amazonaws.com"]}
+    principals {type="Service"
+ identifiers=["sns.amazonaws.com"]}
     actions=["sqs:SendMessage"]
     resources=[aws_sqs_queue.notifications.arn]
-    condition {test="ArnEquals"; variable="aws:SourceArn"; values=[aws_sns_topic.notifications.arn]}
+    condition {test="ArnEquals"
+ variable="aws:SourceArn"
+ values=[aws_sns_topic.notifications.arn]}
   }
 }
 resource "aws_sqs_queue_policy" "notifications" {
@@ -101,7 +111,8 @@ resource "aws_sqs_queue" "pipe_dlq" {
 data "aws_iam_policy_document" "pipes_trust" {
   statement {
     actions=["sts:AssumeRole"]
-    principals {type="Service"; identifiers=["pipes.amazonaws.com"]}
+    principals {type="Service"
+ identifiers=["pipes.amazonaws.com"]}
   }
 }
 resource "aws_iam_role" "pipe" {
@@ -113,8 +124,10 @@ data "aws_iam_policy_document" "pipes_policy" {
     actions=["dynamodb:DescribeStream","dynamodb:GetShardIterator","dynamodb:GetRecords","dynamodb:ListStreams"]
     resources=[aws_dynamodb_table.authorization.stream_arn]
   }
-  statement {actions=["events:PutEvents"];resources=[aws_cloudwatch_event_bus.domain.arn]}
-  statement {actions=["sqs:SendMessage"];resources=[aws_sqs_queue.pipe_dlq.arn]}
+  statement {actions=["events:PutEvents"]
+resources=[aws_cloudwatch_event_bus.domain.arn]}
+  statement {actions=["sqs:SendMessage"]
+resources=[aws_sqs_queue.pipe_dlq.arn]}
 }
 resource "aws_iam_role_policy" "pipe" {
   name = "${var.name}-event-pipe"

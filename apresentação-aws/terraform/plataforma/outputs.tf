@@ -1,5 +1,6 @@
 output "cluster_name" { value = module.eks.cluster_name }
-output "cluster_endpoint" { value = module.eks.cluster_endpoint; sensitive = true }
+output "cluster_endpoint" { value = module.eks.cluster_endpoint
+ sensitive = true }
 output "vpc_id" { value = module.vpc.vpc_id }
 output "authorization_table" { value = aws_dynamodb_table.authorization.name }
 output "accounting_table" { value = aws_dynamodb_table.accounting.name }
