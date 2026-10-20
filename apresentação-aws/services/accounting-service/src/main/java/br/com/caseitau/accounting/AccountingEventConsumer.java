@@ -60,7 +60,7 @@ public class AccountingEventConsumer {
                 JsonNode event = detail.has("id") ? detail : envelope;
                 String eventId = event.path("id").asText();
                 String eventType = event.path("type").asText();
-                if (eventId.isBlank() || !"TransacaoAutorizada".equals(eventType)) {
+                if (eventId.isBlank() || !java.util.Set.of("TransacaoAutorizada", "LimiteAlterado", "TransacaoEstornada").contains(eventType)) {
                     // Malformed/unknown event: leave on queue for DLQ after maxReceiveCount.
                     log.warn("Evento incompatível na fila de contabilidade: messageId={}", message.messageId());
                     continue;
