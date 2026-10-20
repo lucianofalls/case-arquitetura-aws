@@ -1,32 +1,58 @@
-# authorization-limit-service
+# authorization-limit-service — AuthorizationAndLimitReservation
 
-**Estado:** primeiro slice de código, ainda sem build/execução validado neste ambiente.
+**Java 17 / Spring Boot / Clean Architecture / DDD.** Aplicação implementada, com testes de unidade e integração contra DynamoDB Local no pipeline GitHub Actions.
 
-- Java 17, Spring Boot, AWS SDK v2.
-- Bounded Context proposto: `AuthorizationAndLimitReservation`.
-- Primeira operação implementada: `RESERVA`. DEBITO/CREDITO/ESTORNO retornam HTTP 501 até definição de semântica financeira.
-- DynamoDB `TransactWriteItems` (4 itens): LIMIT condicional, AUTH com estado de reserva, IDEMPOTENCY persistente, OUTBOX.
-- O serviço **não publica EventBridge diretamente**; infraestrutura de Streams e Pipes virá em IaC separada.
-- Respostas: 201 nova reserva, 200 replay, 402 limite insuficiente, 404 contrato ausente, 409 conflito ou Idempotency-Key reutilizada com payload distinto, 422 payload inválido e 501 operação não implementada.
+## Bounded Context e funções
 
-## Exemplo
+Módulos DDD: Authorization (decisão/autorização) e Contract Limits (posição/disponibilidade). Referências BIAN: Transaction Authorization + aspectos de Position Keeping. **Não** são dois bancos ou duas transações independentes.
+
+| Operação | Transição em centavos | Evento Outbox | Observação |
+|---|---|---|---|
+| RESERVA | available -= value; reserved += value | TransacaoAutorizada | Reserva temporária, sem captura/liquidação |
+| DEBITO | available -= value; used += value | TransacaoAutorizada | Consumo direto (hipótese a homologar) |
+| CREDITO | used -= value; available += value | LimiteAlterado | Recompõe utilização; não aumenta limite total |
+| ESTORNO | Reverte RESERVA ou DEBITO original | TransacaoEstornada | Exige `id_autorizacao_original`, mesmo contrato/conta/valor, uma vez só |
+
+**Invariantes**: available, reserved e used são não negativos e a soma é igual a total. Valores inteiros em centavos; REST recebe decimal(18,2). Cada aprovação escreve atualização condicionada do limite (versão), AUTH, IDEMPOTENCY, OUTBOX, com uma única `TransactWriteItems` DynamoDB. ESTORNO também atualiza a autorização original (cinco ações).
+
+**Idempotência:** Header `Idempotency-Key` UUID persistido com hash do payload; replay de aprovação retorna 200 com resposta original; repetição com payload diferente retorna 409. Recusa por insuficiência de limite é persistida e reexecutada como 402.
+
+## Estrutura
+
+```text
+src/main/java/br/com/caseitau/auth/
+  domain/
+    ContractLimit.java          # aggregate root + invariantes
+    Authorization.java          # entity
+    OperationType.java          # enum de intenção
+    Money.java                  # value object
+  application/
+    AuthorizationUseCase.java   # orquestração e porta AuthorizationStore
+  api/
+    AuthorizationController.java # REST + validação + Problem Details
+  infrastructure/
+    DynamoAuthorizationAdapter.java # AWS SDK e transação ACID
+```
+
+## Desenvolvimento local
+
+```bash
+cd apresentação-aws
+docker compose up --build
+bash scripts/demo-concorrencia.sh
+```
+
+Depois de iniciado, `contrato-demo` contém limite disponível R$ 7.000. Dois POST RESERVA de R$ 5.000 não podem ser aprovados ao mesmo tempo.
 
 ```bash
 curl -i http://localhost:8080/v1/contratos/contrato-demo/autorizacoes \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: 11111111-2222-4333-8444-555555555555' \
-  -H 'X-Correlation-Id: teste-01' \
   -d '{"id_conta":"conta-demo","valor":5000.00,"moeda":"BRL","tipo_operacao":"RESERVA"}'
 ```
 
-Tabela e conta pré-populadas são necessárias, veja `docker-compose.yml` e `scripts/bootstrap-ddb-local.sh`.
+## Não está pronto para produção
 
-## Limitações conhecidas
+A ACL de core real não está integrada à autorização (domínio de contrato ainda é stub); não há liquidação/posting; não há reconciliador automático após 24h do Streams; políticas regulatórias, antifraude pré-autorização, SLOs e 5.000 TPS precisam de validação. Cliente HTTP sem header `Idempotency-Key` é rejeitado pelo framework. A operação CREDITO/DÉBITO tem semântica de exemplo e **não deve receber dinheiro real sem aceite do negócio**.
 
-- Recusas por falta de limite ainda não são gravadas para replay idempotente imutável; requisito pendente antes de produção.
-- Sem implementação de estorno/captura/liquidação.
-- Integração ACL pré-autorização ainda não conectada.
-- CloudEvent armazenado no atributo `payload` Outbox; Pipes deve filtrar `NewImage.entityType.S=OUTBOX` e transformar adequadamente para EventBridge.
-- Sem reconciliador Outbox para falhas acima das 24h do Streams; não considerar sistema pronto para produção.
-- DynamoDB Local não é equivalência perfeita de operação e escala DynamoDB AWS.
-- Ainda falta teste de concorrência real no DynamoDB Local e benchmark de 5.000 TPS.
+O `authorization-limit-service` **não chama EventBridge diretamente**. Apenas grava Outbox. Streams/Pipes/EventBridge/SQS são configurados no Terraform AWS.

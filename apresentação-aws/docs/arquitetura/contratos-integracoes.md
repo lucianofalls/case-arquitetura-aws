@@ -1,57 +1,85 @@
-# Diagrama de integração de componentes — C4 Container + sequência transacional
+# Integrações entre bounded contexts, microsserviços e AWS
 
-> **Arquitetura-alvo; parcialmente iniciada em código.** O desenho editável com ícones AWS4 encontra-se em [diagramas](../../diagramas/). Consulte também a [matriz BIAN](tabelas-hierarquia-bian-ddd-aws.md).
+O desenho detalhado com ícones AWS4 está em [Draw.io](../../diagramas/pod99-integracao-aws.drawio).
 
-## O que cada serviço faz
+| Microserviço | Bounded Context (nosso) | Referência BIAN v14 | Comando/assinatura | Persistência |
+|---|---|---|---|---|
+| authorization-limit-service | AuthorizationAndLimitReservation: módulos Authorization e Contract Limits | Transaction Authorization e aspectos de Position Keeping | POST autorização; TransactWriteItems | DynamoDB financial-authorization |
+| core-banking-acl-service | CoreBankingIntegration | Current Account/Consumer Loan conforme contrato | GET normalizado de contrato (demo/stub) | Sem banco próprio |
+| accounting-service | AccountingIntegration | Financial Accounting | SQS inbox; dedup event_id | DynamoDB accounting-processing |
+| Futuro consumer fraude | FraudEvaluationIntegration | Fraud Evaluation | SQS pós-autorização | Fora do MVP |
 
-| Componente | Bounded Context / BIAN de referência | Entrada | Saída | Síncrono? | Estado próprio |
-|---|---|---|---|---|---|
-| **authorization-limit-service** (EKS) | AuthorizationAndLimitReservation / Transaction Authorization, Position Keeping | POST /v1/contratos/{id}/autorizacoes; Idempotency-Key | HTTP 201/200/402/409/422 + evento Outbox | **Sim** no comando; emissão **assíncrona** | DynamoDB financial-authorization |
-| **core-banking-acl-service** (EKS) | CoreBankingIntegration / Current Account, Consumer Loan conforme produto | Contrato/conta para validação ou sincronização | Modelo normalizado de contrato | Síncrono fora do fluxo crítico ou pré-sincronização | Stateless no MVP |
-| **DynamoDB Streams + EventBridge Pipes** (AWS gerenciado) | Integração técnica, **não BIAN** | Alterações confirmadas de item OUTBOX | Evento de integração para EventBridge | Assíncrono | Cursor em Streams; **24 horas** de retenção |
-| **EventBridge custom bus** (AWS gerenciado) | Integração técnica | TransacaoAutorizada v1 | SQS por regra/consumer | Assíncrono | Retentiva configurável somente se habilitar archive/replay |
-| **accounting-service** (EKS) | AccountingIntegration / Financial Accounting | Evento na SQS Contabilidade | Registro de inbox e futura integração contábil | Assíncrono | DynamoDB accounting-processing |
-| **antifraud-adapter** (futuro) | Fraud Evaluation (integração) | SQS Antifraude | Avaliação/alertas para risco | Assíncrono após autorização | Não implementado |
-| **notifications-adapter** (futuro) | Comunicação/Notificação | SQS Notificações | Alerta ao cliente | Assíncrono | Não implementado |
-| **data-platform-consumer** (futuro) | Analytics transversal | SQS Data Platform | Ingestão de eventos | Assíncrono | Não implementado |
+## Síncrono — cliente até commit
 
-### O que **não** deve ocorrer
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Cliente
+    participant GW as API Gateway/Cognito/WAF
+    participant Auth as authorization-limit-service
+    participant DDB as DynamoDB
+    Cliente->>GW: POST /v1/contratos/{id}/autorizacoes + UUID
+    GW->>Auth: HTTP privado via NLB e EKS
+    Auth->>DDB: GetItem idempotência / contrato
+    DDB-->>Auth: estado consistente
+    Auth->>Auth: ContractLimit.validate + transition
+    Auth->>DDB: TransactWriteItems(LIMIT, AUTH, IDEMPOTENCY, OUTBOX)
+    alt Commit
+      DDB-->>Auth: OK
+      Auth-->>GW: HTTP 201 (200 se replay)
+      GW-->>Cliente: Resultado
+    else Limite insuficiente
+      Auth->>DDB: Put idempotency decline condicional
+      Auth-->>Cliente: HTTP 402
+    else Conflito otimista
+      Auth->>DDB: Retry com leitura atualizada, limite de tentativas
+      Auth-->>Cliente: HTTP 409 se esgotado
+    end
+```
 
-- Consumer contábil lendo a tabela DynamoDB do serviço de limites.
-- Uma chamada síncrona à contabilidade participando do tempo de resposta da autorização.
-- Serviço de Autorização emitindo diretamente EventBridge depois de atualizar DynamoDB (risco de dual-write).
-- Tratar `DEBITO` como sinônimo automático de `RESERVA` sem definir regras de domínio.
-- Afirmar exactly-once entre EventBridge/SQS e consumer.
-- Presumir que o serviço ACL sempre deve estar no caminho crítico da autorização: sem cache, pre-sincronização ou circuit-breaker isso aumenta latência.
+A transação completa é **somente local no DynamoDB**, no domínio que possui o limite. A disponibilidade financeira e a autorização nunca dependem de uma confirmação EventBridge.
 
-## Fluxo operacional — RESERVA (primeiro vertical slice implementado)
+## Assíncrono — evento depois do commit
 
-1. Canal chama `POST /v1/contratos/{id}/autorizacoes` com `Idempotency-Key`.
-2. API Gateway autentica/autoriza consumidor e encaminha por integração privada ao serviço no EKS.
-3. `AuthorizationUseCase` valida payload e regra; `DynamoAuthorizationAdapter` consulta estado idempotente e saldo do contrato com leitura consistente.
-4. Em uma única `TransactWriteItems`: (a) Update LIMIT condicional, (b) Put AUTH/reserva, (c) Put idempotência, (d) Put OUTBOX. O app retorna 201 após commit, 200 se replay, 402 se insuficiência, 409 para colisão/conflito conforme o caso.
-5. Stream capta a alteração confirmada; Pipes filtra `dynamodb.NewImage` por tipo lógico OUTBOX e transforma o payload; EventBridge roteia para filas SQS.
-6. `accounting-service` consome sua fila, registra `ConsumedEvent` por evento de forma idempotente e confirma a mensagem; **no primeiro slice ele não faz lançamento no razão contábil real**.
-7. Se publicação falhar por tempo superior à retenção do stream, o item Outbox persistido deve permitir reconciliar e republicar. **Reconciliador não implementado ainda**.
-8. Operações válidas `DEBITO`, `CREDITO` e `ESTORNO` exigem transições próprias; **ainda não implementadas**.
+```mermaid
+sequenceDiagram
+    autonumber
+    participant DDB as DynamoDB Streams
+    participant Pipe as EventBridge Pipes
+    participant EB as EventBridge Bus
+    participant Q as SQS Contabilidade
+    participant AC as accounting-service
+    participant Inbox as DynamoDB accounting-processing
+    DDB->>Pipe: NewImage entityType OUTBOX
+    Pipe->>EB: CloudEvent (EventBridge detail)
+    EB->>Q: Fanout por event rule
+    Q->>AC: ReceiveMessage
+    AC->>Inbox: PutItem condition attribute_not_exists
+    Inbox-->>AC: gravado / duplicata
+    AC->>Q: DeleteMessage após persistência
+```
 
-## Contratos de dados
+- Streams apenas 24 horas, precisa recuperação após falha prolongada.
+- Mensageria e consumidores **at-least-once**: duplicação/reordenação sempre possível.
+- Contratos publicados em `contracts/openapi` e `contracts/asyncapi`; o registry é governança, não validação automática de todo evento.
+- SQS DLQ de cada consumidor e alarmes. SNS é usado como fan-out adicional de notificações.
+- O EventBridge Pipes transforma os atributos Outbox num evento CloudEvents cujo conteúdo aparece em `detail`.
 
-- API HTTP/JSON conforme PDF: `valor decimal(18,2)`, `moeda`, `tipo_operacao` (`DEBITO`, `CREDITO`, `RESERVA`, `ESTORNO`), `id_conta`, headers e respostas.
-- DynamoDB: valores de BRL em **centavos inteiros**, sem float.
-- Mensagem Outbox: envelope CloudEvents `specversion=1.0`, `id` UUID, `type=TransacaoAutorizada`, `source`, `time`, `datacontenttype=application/json`, `data` contendo `id_contrato`, `id_autorizacao`, `valor`, `saldo_reservado`, `correlation_id` e `trace_id` quando houver.
-- Nunca confiar em ordenação global de mensagens; para dependência de ordem por contrato, adicionar versão/seqüência do agregado e tratar reordenação no consumidor.
-- Reentregas: chave (`Idempotency-Key` + hash) no comando, (`event_id`) no consumidor.
+## Definição das operações (hipóteses do MVP)
 
-## Segurança AWS
+| Operação | Alterações no agregado | Evento |
+|---|---|---|
+| RESERVA | available→reserved | TransacaoAutorizada |
+| DEBITO | available→used | TransacaoAutorizada |
+| CREDITO | used→available | LimiteAlterado |
+| ESTORNO | Reverte RESERVA ou DEBITO, apenas uma vez | TransacaoEstornada |
 
-WAF na entrada pública, JWT/OAuth2 no API Gateway/authorizer, VPC Link para ALB/NLB interno, EKS em sub-redes privadas, Pod Identity/IAM com menor privilégio, endpoints VPC quando aplicável, KMS para DynamoDB/SQS, TLS e Secrets Manager quando necessário. Observabilidade com métricas de `TransactionCanceled`, latência p95/p99, lag, DLQ e quantidade de Outbox sem publicação.
+**Essas transições são convenções implementadas para demonstrar consistência**, não regras oficialmente confirmadas pelo Itaú. `id_autorizacao_original` é a extensão proposta para ESTORNO. As regras de produto, ciclo contábil e integração ao core exigem refinamento antes de uso real.
 
-## Limites do desenho e testes que faltam
+## Contexto ACL
 
-- Benchmark 5.000 TPS de pico, hot keys por contrato, HPA/Karpenter e custo.
-- Testes de falha depois do commit, crash/reprocessamento, 24h de perda e reconciliação.
-- Adicionar auditoria/retenção/regras regulatórias aprovadas pelo negócio.
-- Especificar eventual antifraude **pré-autorização** (síncrona, com SLA) versus avaliação **pós-autorização** (assíncrona); o case apenas cita consumidor antifraude e não define bloqueio síncrono.
+A camada anticorrupção transforma `Current Account` e condições de contrato de sistemas legados em modelo de domínio normalizado, impedindo acoplamento do núcleo a formatos do core. O serviço está em modo `demo` local; não é chamado no caminho crítico ainda para não inventar contratos ou SLA do core.
 
-Fontes: https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-pipes-dynamodb.html e https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html.
+## Segurança e Well-Architected
+
+Entrada WAF/Cognito/API Gateway REST, VPC Link com NLB privado, EKS Auto Mode multi-AZ, Pod Identity e IAM de privilégio mínimo, DynamoDB PITR, filas criptografadas e CloudWatch alarms/logs. A solução completa inclui também ADRs de bancos, custo, monitoramento e carga, mas não houve teste AWS real.

@@ -1,11 +1,17 @@
-# accounting-service
+# accounting-service — AccountingIntegration
 
-**Implementação inicial:** consumer Amazon SQS → inbox idempotente DynamoDB.
-Não há débito, crédito ou lançamento em razão contábil real, nem integração com core existente. Isso será um segundo incremento.
+Consumer SQS (EventBridge) de `TransacaoAutorizada`, `TransacaoEstornada` e `LimiteAlterado`. Persistência **exclusiva** na tabela `accounting-processing`, com escrita condicional da Inbox por `eventId`, evitando duplo processamento de evento recebido.
 
-Se `ACCOUNTING_SQS_URL` não estiver preenchida, o consumer não consulta fila.
-Com SQS real, é necessário IAM `sqs:ReceiveMessage`/`sqs:DeleteMessage`, `dynamodb:PutItem` para tabela `accounting-processing` e uma DLQ configurada na origem.
+**Não substitui** razão geral, escrituração regulatória nem ledger bancário. O primeiro incremento apenas registra o recebimento durável com status `RECEIVED_FOR_ACCOUNTING`. A evolução deve criar uma instrução contábil idempotente com estado e Outbox próprio para chamadas ao core.
 
-A mensagem esperada é EventBridge JSON cuja propriedade `detail` contém um CloudEvent com `id` e `type=TransacaoAutorizada`. O Pipe precisa transformar `OUTBOX.payload` nessa forma antes de enviar para EventBridge.
+Ao receber:
+1. SQS long polling.
+2. Extrai envelope CloudEvent de `detail` do EventBridge.
+3. Confere `id` e evento conhecido.
+4. Persiste Inbox condicional; reconhece duplicata.
+5. Executa SQS Delete somente após sucesso ou duplicata confirmada.
+6. Falha desconhecida: mensagem retorna após timeout de visibilidade; DLQ é configurada no Terraform.
 
-O registro `RECEIVED_FOR_ACCOUNTING` **não equivale a lançamento no razão**. Se futuramente o consumidor executar efeitos downstream, terá de adicionar estado de processamento e outbox local para não perder efeitos entre persistência e ACK da fila.
+Se `ACCOUNTING_SQS_URL` não estiver preenchida, não faz polling (útil no Compose local).
+
+**IAM mínimo:** DynamoDB PutItem na sua própria tabela; SQS ReceiveMessage/DeleteMessage/GetQueueAttributes apenas na sua fila. O backend não lê a tabela `financial-authorization`. Teste em GitHub Actions: Maven compile/verify.

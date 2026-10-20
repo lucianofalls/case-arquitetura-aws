@@ -1,32 +1,36 @@
-# Escopo de implementação incremental — POD99
+# Status da implementação e fronteiras de aceite
 
-**Objetivo:** construir uma demonstração pequena, honesta e verificável, não simular 80 milhões de contas nem alegar 5.000 TPS sem teste.
+**Implementação no GitHub, não provisionada em AWS.** O CI confirma compilação/testes e validação estática do Terraform, mas não substitui um `plan/apply` com credenciais reais nem um teste de pico 5.000 TPS.
 
-## Ordem dos incrementos
-
-| Incremento | Componente | Critério de aceite |
+| Requisito do case | Artefato | Evidência / status |
 |---|---|---|
-| 1 | `authorization-limit-service` | Endpoint POST, validade da idempotência, RESERVA condicional DynamoDB, Outbox na transação |
-| 2 | `accounting-service` | Ler da SQS; deduplicar event_id; persistir evento recebido, sem afirmar escrituração bancária |
-| 3 | `core-banking-acl-service` | Interface adapter/mapeamento e endpoint demo; legado real não conectado |
-| 4 | Infra AWS | EKS, tabela Streams, Pipes, EventBridge, SQS, IAM/Pod Identity, metrics, DLQ e deploy automatizados |
-| 5 | Consistência completa | Ciclo de vida de DEBITO/CREDITO/RESERVA/ESTORNO, rejeições idempotentes, estorno concorrente |
-| 6 | Operação financeira | Reconciliador de Outbox >24h, métricas, auditoria, segurança, SLO e disaster recovery |
-| 7 | Teste escalabilidade | Testes de 5.000 TPS e hot contract; FinOps versus PostgreSQL com carga idêntica |
+| DDD, agregados, invariantes | `services/authorization-limit-service/domain/` | ContractLimit, Money, OperationType, Authorization; testes de regra |
+| SOLID / Clean / Hexagonal | API → UseCase/Port → Domain → DynamoAdapter | Fronteiras separadas; port testável |
+| APIs OpenAPI 3.x / Problem Details | `contracts/openapi/authorization-v1.yaml`, AuthorizationController | Contrato YAML CI; HTTP 201/200/402/409/422 |
+| Quatro tipos de operação | ContractLimit / DynamoAuthorizationAdapter | RESERVA, DEBITO, CREDITO, ESTORNO implementados **com hipóteses de semântica** |
+| Concorrência do limite | TransactWriteItems + optimistic version + condition | Testcontainers DDB Local de duas reservas concorrentes |
+| Idempotência financeira | DynamoDB IDEMPOTENCY | Teste de replay e hash; persistência de recusa por saldo insuficiente |
+| Transactional Outbox | DynamoDB OUTBOX no commit | Item imutável na transação; teste de estorno |
+| Mensageria EventBridge + SQS + SNS | Terraform `plataforma/messaging.tf` | Sintaxe/estrutura Terraform validada; **não aplicado** |
+| CloudEvents + versionamento + registry | AsyncAPI e `aws_schemas_schema` | Contratos e Terraform validados estaticamente |
+| Banco por serviço | financial-authorization / accounting-processing | DynamoDB no núcleo e no inbox contábil; sem cross-service query |
+| EKS + segurança / API Management | EKS Auto Mode, Cognito, WAF, VPC Link, Pod Identity | Terraform validado, **sem deploy** |
+| Observabilidade | EKS control plane logs, SQS DLQ, DDB throttling alarms | Terraform presente; sem métricas de aplicação personalizadas |
+| Integração Core Banking | core-banking-acl-service | Stub `demo` somente; não existe integração real |
+| Contabilização | accounting-service | Inbox SQS idempotente; **sem lançamentos contábeis** |
+| Proteção contra falha prolongada | Outbox persistida e `scripts/reconciliar-outbox.py` | Replay manual por event_id, **não reconciliador automático** |
+| SLA/Resiliência/FinOps/5000 TPS | docs/ADR + k6 | Metas sem comprovação; dependem de conta AWS e benchmarks |
+| Infra totalmente IaC | `terraform/plataforma`, `terraform/workloads` | Dois estágios Terraform; sem `apply` |
 
-## Honestidade de entrega
+## Bloqueadores antes de alegar pronto para produção
 
-Código-fonte, arquivos de teste e definições de ambiente **não equivalem a build/teste executados nem a serviços implantados**. Acompanhar builds GitHub Actions quando forem configurados. Código pode ser revisado antes de executar `mvn test` ou `docker compose up --build`.
+- Validação das regras de produto/conta e integração core banking real; Estado de contrato e elegibilidade.
+- Definição oficial de captura, liquidação, estorno parcial, crédito, reconciliação de contabilização; homologação jurídica/risco.
+- Reconciliação de Outbox automática e escalável para falhas >24h; monitorar atrasos e alertar.
+- Evidência de latência e 5000 TPS (p95/p99, contratos altamente concorridos e custo).
+- DR multi-região, RTO/RPO, acesso de operadores, auditoria e retenção.
+- Hardening NLB/API Gateway, WAF por cliente/plano e escalonamento consumer por backlog SQS (KEDA ou alternativa).
 
-## Comandos previstos
+## CI
 
-```bash
-cd services/authorization-limit-service
-mvn test
-mvn spring-boot:run
-
-# Para ambiente local isolado:
-docker compose up --build
-```
-
-Até configurar SQS local ou cloud, o consumidor é executável apenas quando a fila existe e as credenciais AWS estão disponíveis.
+[GitHub Actions — POD99](https://github.com/lucianofalls/case-arquitetura-aws/actions/workflows/pod99-apresentacao-aws.yml). Todos os jobs são sem credenciais AWS e não criam recursos. Um sucesso de CI valida **compilação/testes e Terraform validate**, não implantação.
