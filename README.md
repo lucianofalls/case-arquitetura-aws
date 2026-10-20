@@ -1,58 +1,95 @@
-# Case de Arquitetura AWS — Itaú POD99
+# Case de Arquitetura AWS — POD99 · Nova Plataforma de Finanças
 
-> **Status:** arquitetura-alvo em refinamento. Nenhum microsserviço ou recurso AWS foi implantado.
+> **Status:** arquitetura-alvo em estudo, sem microsserviços implementados ou recursos AWS provisionados.
 >
-> **Aviso:** este repositório está **público**. O conteúdo descreve uma proposta técnica baseada no enunciado do desafio; não apresenta infraestrutura ou informação interna do banco.
+> **Repositório público:** documentação independente de um case técnico. Não contém informações internas ou infraestrutura real do banco.
 
-## Objetivo de negócio
+## Objetivo do case
 
-Projetar uma plataforma de autorização síncrona de transações financeiras, gerenciamento de limites por contrato, concorrência consistente, idempotência e publicação assíncrona de eventos contábeis.
+Projetar e demonstrar autorização síncrona de operações financeiras, verificação e reserva de limites por contrato, concorrência segura, idempotência, integração com core banking e emissão assíncrona de eventos de domínio.
 
-**Requisitos de escala apresentados no desafio:** cerca de 80 milhões de contas ativas, 3 a 5 contratos por conta e pico de aproximadamente 5.000 TPS. **Pico de TPS não é média mensal.**
+**Volumetria informada:** aproximadamente 80 milhões de contas, 3–5 contratos por conta e **pico** de 5.000 transações por segundo. Pico não significa TPS sustentado.
 
-## Visão da solução (proposta em estudo)
+## Arquitetura-base atual — DynamoDB
+
+A arquitetura de referência escolhida **para evoluir o desenho** é **Amazon EKS + DynamoDB + DynamoDB Streams + EventBridge Pipes + EventBridge + SQS**. O PostgreSQL permanece como **alternativa técnica e financeira**, não faz parte do fluxo principal.
 
 ```text
-Clientes → API Gateway / WAF → Amazon EKS (nós EC2)
-                                      |
-                         Authorization + Contract Limits
-                                      |
-                          PostgreSQL (transação ACID)
-                                      |
-                        Outbox na mesma transação
-                                      |
-                              Outbox relay
-                                      |
-                            EventBridge Bus
-                              /     |     \
-                            SQS    SQS    SQS
-                             |      |      |
-                      Contabilidade Fraude Notificações
+Cliente
+  |
+Amazon API Gateway + AWS WAF
+  |
+Integração privada (ALB/NLB conforme projeto)
+  |
+Amazon EKS (EC2, Multi-AZ)
+  |
+  +-- authorization-limit-service
+  |     - módulo Authorization
+  |     - módulo Contract Limits
+  |     |
+  |     +-- DynamoDB TransactWriteItems (mesmo account e região)
+  |            1. UPDATE condicional do item LIMIT#contrato
+  |            2. PUT autorização + dados da reserva
+  |            3. PUT chave de idempotência
+  |            4. PUT evento Outbox
+  |            ---> COMMIT ATÔMICO; resposta síncrona
+  |
+  +-- core-banking-acl-service (adaptação ao legado)
+  |
+  +-- accounting-service (consumidor de eventos)
+
+Após commit, sem bloquear a resposta:
+DynamoDB Streams (captura de alterações confirmadas)
+  |
+EventBridge Pipes (filtro: INSERT de Outbox; transformação)
+  |
+Amazon EventBridge custom event bus
+  |
+Regras de roteamento
+  +-- SQS Contabilidade --> accounting-service --> persistência própria
+  +-- SQS Antifraude --> consumidor/integrador
+  +-- SQS Notificações --> consumidor/integrador
+  +-- SQS Data Platform (se incluída no escopo)
 ```
 
-A autorização é síncrona e a integração com os consumidores é assíncrona. Na proposta atual para o MVP, a transação ACID termina no PostgreSQL; mensageria tem semântica *at-least-once*, exigindo idempotência e reconciliação.
+**Atenção:** no modelo de **quatro operações de escrita** acima, `LimitReservation` é **um conceito de domínio incorporado no item de autorização**; não é uma quinta gravação. Se a reserva ganhar um item independente, a transação e o custo deverão ser atualizados.
+
+### Garantias e limitações
+
+- A regra de saldo disponível mínimo é verificada no **`Update` condicional do item de limite**, dentro de `TransactWriteItems`.
+- Uma transação confirma as quatro mudanças ou nenhuma. A consistência financeira não depende do Streams/EventBridge.
+- A chave `Idempotency-Key` deve possuir registro durável no aplicativo; `ClientRequestToken` do SDK **sozinho não resolve** replays após a janela de dez minutos.
+- Habilitar DynamoDB Streams e configurar Pipes é obrigatório; **DynamoDB não publica automaticamente no EventBridge**.
+- Streams tem retenção de aproximadamente **24 horas**: definir monitoramento, DLQ/retry onde suportado e **reconciliação/republicação da Outbox persistida** para falhas prolongadas.
+- Eventos e consumidores operam com semântica **at-least-once**, exigindo deduplicação e tolerância a reordenação; **não há exactly-once ponta a ponta**.
+- Testar hot keys e concorrência concentrada por contrato antes de afirmar capacidade de 5.000 TPS.
+
+## Relação BIAN → DDD → Serviços → Persistência
+
+**BIAN** delimita funções bancárias de referência. **DDD** define bounded contexts e agregados. **EKS** executa os nossos serviços. **DynamoDB** mantém os dados do núcleo financeiro.
+
+Os Service Domains BIAN não são templates de microsserviços e não exigem correspondência 1:1.
 
 ## Documentação
 
-- [Tabelas e hierarquia BIAN → DDD → EKS → PostgreSQL](docs/arquitetura/tabelas-hierarquia-bian-ddd-aws.md)
-- [Fundamentação detalhada da hierarquia e fronteiras DDD](docs/arquitetura/bian-ddd-microsservicos-banco.md)
-- [FinOps: custos e premissas](docs/finops/estimativa-custos.md)
-- [Comparação DynamoDB vs RDS PostgreSQL](docs/finops/dynamodb-vs-rds-postgresql.md)
+- [Tabelas: BIAN → DDD → EKS → DynamoDB](docs/arquitetura/tabelas-hierarquia-bian-ddd-aws.md)
+- [Hierarquia e decisões de modelagem](docs/arquitetura/bian-ddd-microsservicos-banco.md)
+- [ADR-001: arquitetura-base DynamoDB e publicação de eventos](docs/adr/ADR-001-dynamodb-streams-eventbridge.md)
+- [FinOps: custos parciais da alternativa DynamoDB](docs/finops/estimativa-custos.md)
+- [Alternativa: DynamoDB vs RDS PostgreSQL](docs/finops/dynamodb-vs-rds-postgresql.md)
 
-## Decisões candidatas e pendências
+## Decisões em aberto
 
-- **Runtime candidato:** Amazon EKS com nós EC2, HPA e Karpenter (depende de testes).
-- **Persistência candidata para o MVP:** PostgreSQL em Docker; RDS for PostgreSQL Multi-AZ como desenho de produção, sujeito a benchmark e avaliação de custos. DynamoDB permanece como alternativa aberta.
-- **Integração candidata com PostgreSQL:** Transactional Outbox → relay/CDC → EventBridge → filas SQS. **Alternativa DynamoDB:** Streams → EventBridge Pipes → EventBridge → SQS.
-- **BIAN:** mapeamento é referência funcional; Service Domains não implicam necessariamente microsserviços um-para-um.
-- **Ainda não definidos:** operações/Control Records detalhados de cada Service Domain BIAN v14, RTO/RPO, SLO p95/p99, retenção de auditoria, regras exatas de estorno, TPS médio, perfil de concorrência, despesas completas AWS e decisão definitiva do banco.
-- **Execução do case:** entregar código e testes, IaC, diagramas, ADRs e demonstração local ou AWS em cinco dias úteis.
+Escolha definitiva da base de produção mediante benchmark/FinOps; contratos de domínio por produto; mapeamento operacional BIAN v14 detalhado; modelo de reservas/estorno; RPO/RTO; SLO; retenção financeira e auditoria; padrão de reconciliação da Outbox e processo de recuperação; dimensionamento de EKS/rede.
+
+**Ainda não foram criados serviços, IaC, testes ou deploys**. O fluxo mostrado é proposta de arquitetura, não infraestrutura ativa.
 
 ## Fontes
 
-- Enunciado: *Desafio Técnico — POD99, Nova Plataforma de Finanças, Arquiteto de Aplicação* (5 páginas).
-- [AWS Well-Architected Framework](https://docs.aws.amazon.com/wellarchitected/latest/framework/welcome.html)
+- PDF do desafio: *POD99 — Nova Plataforma de Finanças · Arquiteto de Aplicação*.
 - [BIAN Service Landscape](https://bian.org/deliverables/service-landscape/)
-- [AWS Transactional Outbox](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)
-
-Este repositório é um estudo/case independente, não uma implementação oficial do Itaú.
+- [AWS Well-Architected Framework](https://docs.aws.amazon.com/wellarchitected/latest/framework/welcome.html)
+- [DynamoDB TransactWriteItems](https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_TransactWriteItems.html)
+- [DynamoDB com EventBridge](https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/eventbridge-for-dynamodb.html)
+- [DynamoDB Stream como fonte do Pipes](https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-pipes-dynamodb.html)
+- [Transactional Outbox](https://docs.aws.amazon.com/prescriptive-guidance/latest/cloud-design-patterns/transactional-outbox.html)
