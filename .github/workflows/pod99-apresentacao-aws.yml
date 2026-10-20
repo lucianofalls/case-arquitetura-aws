@@ -1,0 +1,88 @@
+name: POD99 - Testes Java e Terraform
+
+on:
+  push:
+    paths:
+      - 'apresentação-aws/**'
+      - '.github/workflows/pod99-apresentacao-aws.yml'
+  pull_request:
+    paths:
+      - 'apresentação-aws/**'
+      - '.github/workflows/pod99-apresentacao-aws.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  java:
+    name: Maven test - ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        service:
+          - authorization-limit-service
+          - accounting-service
+          - core-banking-acl-service
+    defaults:
+      run:
+        working-directory: apresentação-aws/services/${{ matrix.service }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+          cache-dependency-path: apresentação-aws/services/${{ matrix.service }}/pom.xml
+      - name: Compile and run tests
+        run: mvn -B -ntp clean verify
+
+  terraform:
+    name: Terraform validate - ${{ matrix.stage }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [plataforma, workloads]
+    defaults:
+      run:
+        working-directory: apresentação-aws/terraform/${{ matrix.stage }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.13.3
+      - name: Parse and format HCL
+        run: terraform fmt -recursive
+      - name: Initialize for validation, without a backend or provision
+        run: terraform init -backend=false -input=false
+      - name: Validate configuration
+        run: terraform validate -no-color
+
+  contracts:
+    name: Validate OpenAPI and AsyncAPI YAML
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install pyyaml==6.0.2
+      - name: Parse YAML and validate required fields
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import yaml
+          base = Path('apresentação-aws/contracts')
+          oas = yaml.safe_load((base/'openapi/authorization-v1.yaml').read_text())
+          asyncapi = yaml.safe_load((base/'asyncapi/financial-events-v1.yaml').read_text())
+          assert oas['openapi'].startswith('3.')
+          assert '/v1/contratos/{id_contrato}/autorizacoes' in oas['paths']
+          assert asyncapi['asyncapi'].startswith('3.')
+          assert 'TransacaoAutorizada' in asyncapi['components']['messages']
+          print('OAS/AsyncAPI YAML OK')
+          PY
