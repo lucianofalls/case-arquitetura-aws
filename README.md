@@ -17,13 +17,11 @@ Clientes → API Gateway / WAF → Amazon EKS (nós EC2)
                                       |
                          Authorization + Contract Limits
                                       |
-                           DynamoDB TransactWriteItems
+                          PostgreSQL (transação ACID)
                                       |
-                         Item Outbox na mesma transação
+                        Outbox na mesma transação
                                       |
-                           DynamoDB Streams
-                                      |
-                           EventBridge Pipes
+                              Outbox relay
                                       |
                             EventBridge Bus
                               /     |     \
@@ -32,21 +30,22 @@ Clientes → API Gateway / WAF → Amazon EKS (nós EC2)
                       Contabilidade Fraude Notificações
 ```
 
-A autorização é síncrona e a integração com os consumidores é assíncrona. A transação ACID termina no DynamoDB; mensageria tem semântica *at-least-once*, exigindo idempotência e reconciliação.
+A autorização é síncrona e a integração com os consumidores é assíncrona. Na proposta atual para o MVP, a transação ACID termina no PostgreSQL; mensageria tem semântica *at-least-once*, exigindo idempotência e reconciliação.
 
 ## Documentação
 
-- [Visão geral e rastreabilidade BIAN → DDD → AWS](docs/arquitetura/visao-geral.md)
+- [Tabelas e hierarquia BIAN → DDD → EKS → PostgreSQL](docs/arquitetura/tabelas-hierarquia-bian-ddd-aws.md)
+- [Fundamentação detalhada da hierarquia e fronteiras DDD](docs/arquitetura/bian-ddd-microsservicos-banco.md)
 - [FinOps: custos e premissas](docs/finops/estimativa-custos.md)
-- [ADR-001: núcleo transacional e controle do limite](docs/adr/ADR-001-nucleo-transacional.md)
+- [Comparação DynamoDB vs RDS PostgreSQL](docs/finops/dynamodb-vs-rds-postgresql.md)
 
 ## Decisões candidatas e pendências
 
 - **Runtime candidato:** Amazon EKS com nós EC2, HPA e Karpenter (depende de testes).
-- **Persistência candidata:** DynamoDB com condição atômica para reserva e Outbox transacional.
-- **Integração candidata:** DynamoDB Streams → EventBridge Pipes → EventBridge → filas SQS.
+- **Persistência candidata para o MVP:** PostgreSQL em Docker; RDS for PostgreSQL Multi-AZ como desenho de produção, sujeito a benchmark e avaliação de custos. DynamoDB permanece como alternativa aberta.
+- **Integração candidata com PostgreSQL:** Transactional Outbox → relay/CDC → EventBridge → filas SQS. **Alternativa DynamoDB:** Streams → EventBridge Pipes → EventBridge → SQS.
 - **BIAN:** mapeamento é referência funcional; Service Domains não implicam necessariamente microsserviços um-para-um.
-- **Ainda não definidos:** Service Domains e posições oficiais no BIAN v14, RTO/RPO, SLO p95/p99, retenção de auditoria, regras exatas de estorno, TPS médio, perfil de concorrência, despesas completas AWS.
+- **Ainda não definidos:** operações/Control Records detalhados de cada Service Domain BIAN v14, RTO/RPO, SLO p95/p99, retenção de auditoria, regras exatas de estorno, TPS médio, perfil de concorrência, despesas completas AWS e decisão definitiva do banco.
 - **Execução do case:** entregar código e testes, IaC, diagramas, ADRs e demonstração local ou AWS em cinco dias úteis.
 
 ## Fontes
