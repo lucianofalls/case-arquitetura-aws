@@ -56,6 +56,22 @@ flowchart LR
 - **Contrato**: [OpenAPI 3.x](contracts/openapi/authorization-v1.yaml) e [AsyncAPI/CloudEvents](contracts/asyncapi/financial-events-v1.yaml);
 - **Terraform**: `terraform/plataforma` (EKS Auto Mode, VPC, DDB, Streams, Pipes, SQS/SNS, WAF, API GW, Cognito, IAM, ECR) e `terraform/workloads` (deploys, NLB, HPA, PDB).
 
+## Teste local da integração AWS simulada (LocalStack)
+
+Já existe um Compose **separado** para tentar executar o fluxo completo de eventos no seu Mac: [guia passo a passo](docs/implementacao/TESTES-LOCALSTACK.md).
+
+```bash
+cp .env.example .env
+# Insira LOCALSTACK_AUTH_TOKEN no arquivo .env (ignorado pelo Git).
+docker compose -f docker-compose.localstack.yml config --quiet
+docker compose -f docker-compose.localstack.yml up --build -d
+docker compose -f docker-compose.localstack.yml --profile tools run --rm tools
+```
+
+**LocalStack Hobby:** DynamoDB, DynamoDB Streams, EventBridge, SNS e SQS são emulados; como EventBridge Pipes nativo exige Ultimate, um `localstack-stream-relay` Python substitui o Pipe **somente no ambiente local**. O Terraform AWS continua configurando EventBridge Pipes real.
+
+**Situação do teste:** arquivos entregues e revisão estática em andamento; **não houve execução Docker do novo Compose neste ambiente**. O GitHub Actions permanece removido. Não confundir LocalStack com EKS/VPC/IAM/WAF da AWS.
+
 ## Demo sem custos AWS
 
 Requer Docker e Docker Compose:
