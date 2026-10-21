@@ -29,7 +29,7 @@ resource "aws_iam_role_policy" "authorization" {
 
     Version = "2012-10-17"
     Statement = [{
-Effect="Allow",Action=["dynamodb:GetItem","dynamodb:TransactWriteItems"],Resource=aws_dynamodb_table.authorization.arn
+Effect="Allow",Action=["dynamodb:GetItem","dynamodb:PutItem","dynamodb:TransactWriteItems"],Resource=aws_dynamodb_table.authorization.arn
 }
 ]
   
