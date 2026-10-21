@@ -1,0 +1,98 @@
+# Standalone LOCAL test stack. Does NOT deploy Terraform or contact AWS.
+# LocalStack Hobby: DynamoDB/Streams + EventBridge + SQS; Pipes replaced by
+# explicit stream-relay container. Production Terraform still uses real Pipes.
+x-local-tools: &local-tools
+  image: pod99-local-tools:dev
+  build:
+    context: .
+    dockerfile: tools/localstack/Dockerfile
+  environment: &aws-env
+    AWS_DEFAULT_REGION: us-east-1
+    AWS_REGION: us-east-1
+    AWS_ACCESS_KEY_ID: test
+    AWS_SECRET_ACCESS_KEY: test
+    AWS_ENDPOINT_URL: http://localstack:4566
+    AUTH_TABLE: financial-authorization
+    ACCOUNTING_TABLE: accounting-processing
+    EVENT_BUS: pod99-local-domain-events
+
+services:
+  localstack:
+    image: ${LOCALSTACK_IMAGE:-localstack/localstack:latest}
+    environment:
+      LOCALSTACK_AUTH_TOKEN: ${LOCALSTACK_AUTH_TOKEN:?Configure LOCALSTACK_AUTH_TOKEN em .env ou no shell; nunca faça commit do token}
+      SERVICES: dynamodb,dynamodbstreams,events,sqs,sns
+      SQS_ENDPOINT_STRATEGY: path
+      LOCALSTACK_HOST: localstack:4566
+      PERSISTENCE: "0"
+    ports:
+      - "127.0.0.1:4566:4566"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:4566/_localstack/health >/dev/null"]
+      interval: 5s
+      timeout: 4s
+      retries: 25
+      start_period: 20s
+
+  localstack-init:
+    <<: *local-tools
+    command: ["python", "/tools/init.py"]
+    depends_on:
+      localstack:
+        condition: service_healthy
+    restart: "no"
+
+  localstack-stream-relay:
+    <<: *local-tools
+    command: ["python", "-u", "/tools/relay.py"]
+    depends_on:
+      localstack-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  authorization-limit-service:
+    build: ./services/authorization-limit-service
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DDB_ENDPOINT: http://localstack:4566
+      DDB_TABLE: financial-authorization
+    depends_on:
+      localstack-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  accounting-service:
+    build: ./services/accounting-service
+    environment:
+      AWS_REGION: us-east-1
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      DDB_ENDPOINT: http://localstack:4566
+      ACCOUNTING_TABLE: accounting-processing
+      SQS_ENDPOINT: http://localstack:4566
+      ACCOUNTING_SQS_URL: http://localstack:4566/queue/us-east-1/000000000000/pod99-local-accounting
+      ACCOUNTING_POLL_DELAY_MS: "1500"
+    depends_on:
+      localstack-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  core-banking-acl-service:
+    build: ./services/core-banking-acl-service
+    ports:
+      - "127.0.0.1:8082:8082"
+    environment:
+      SPRING_PROFILES_ACTIVE: demo
+    restart: unless-stopped
+
+  tools:
+    <<: *local-tools
+    profiles: ["tools"]
+    command: ["python", "/tools/smoke.py"]
+    depends_on:
+      localstack-init:
+        condition: service_completed_successfully
