@@ -8,6 +8,8 @@ app:
     region: ${AWS_REGION:us-east-1}
   ddb:
     table: ${ACCOUNTING_TABLE:accounting-processing}
+    endpoint: ${DDB_ENDPOINT:}
   sqs:
+    endpoint: ${SQS_ENDPOINT:}
     queue-url: ${ACCOUNTING_SQS_URL:}
     poll-delay-ms: ${ACCOUNTING_POLL_DELAY_MS:2000}
